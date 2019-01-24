@@ -770,8 +770,6 @@ enum enum_query_type
 /* query_id */
 extern query_id_t global_query_id;
 
-void unireg_end(void);
-
 /* increment query_id and return it.  */
 inline __attribute__((warn_unused_result)) query_id_t next_query_id()
 {

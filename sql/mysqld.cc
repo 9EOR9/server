@@ -1919,7 +1919,10 @@ static void kill_server(int sig)
       sig != 0)
     unireg_abort(1);				/* purecov: inspected */
   else
-    unireg_end();
+  {
+    clean_up(1);
+    sd_notify(0, "STATUS=MariaDB server is down");
+  }
 
 #endif /* EMBEDDED_LIBRARY*/
 
@@ -1954,36 +1957,6 @@ extern "C" sig_handler print_signal_warning(int sig)
 }
 
 #ifndef EMBEDDED_LIBRARY
-
-static void init_error_log_mutex()
-{
-  mysql_mutex_init(key_LOCK_error_log, &LOCK_error_log, MY_MUTEX_INIT_FAST);
-}
-
-
-static void clean_up_error_log_mutex()
-{
-  mysql_mutex_destroy(&LOCK_error_log);
-}
-
-
-/**
-  cleanup all memory and end program nicely.
-
-    If SIGNALS_DONT_BREAK_READ is defined, this function is called
-    by the main thread. To get MySQL to shut down nicely in this case
-    (Mac OS X) we have to call exit() instead if pthread_exit().
-
-  @note
-    This function never returns.
-*/
-void unireg_end(void)
-{
-  clean_up(1);
-  sd_notify(0, "STATUS=MariaDB server is down");
-}
-
-
 extern "C" void unireg_abort(int exit_code)
 {
   DBUG_ENTER("unireg_abort");
@@ -2050,7 +2023,6 @@ static void mysqld_exit(int exit_code)
 #endif /* WITH_WSREP */
   mysql_audit_finalize();
   clean_up_mutexes();
-  clean_up_error_log_mutex();
   my_end((opt_endinfo ? MY_CHECK_ERROR | MY_GIVE_INFO : 0));
 #ifdef WITH_PERFSCHEMA_STORAGE_ENGINE
   shutdown_performance_schema();        // we do it as late as possible
@@ -2075,7 +2047,7 @@ static void mysqld_exit(int exit_code)
 
 #endif /* !EMBEDDED_LIBRARY */
 
-void clean_up(bool print_message)
+static void clean_up(bool print_message)
 {
   DBUG_PRINT("exit",("clean_up"));
   if (cleanup_done++)
@@ -2276,6 +2248,7 @@ static void clean_up_mutexes()
   mysql_mutex_destroy(&LOCK_commit_ordered);
   mysql_mutex_destroy(&LOCK_slave_background);
   mysql_cond_destroy(&COND_slave_background);
+  mysql_mutex_destroy(&LOCK_error_log);
   DBUG_VOID_RETURN;
 }
 
@@ -5717,7 +5690,7 @@ int mysqld_main(int argc, char **argv)
   }
 #endif /* HAVE_PSI_INTERFACE */
 
-  init_error_log_mutex();
+  mysql_mutex_init(key_LOCK_error_log, &LOCK_error_log, MY_MUTEX_INIT_FAST);
 
   /* Initialize audit interface globals. Audit plugins are inited later. */
   mysql_audit_initialize();
