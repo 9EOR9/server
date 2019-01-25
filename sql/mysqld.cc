@@ -394,7 +394,6 @@ bool opt_endinfo, using_udf_functions;
 my_bool locked_in_memory;
 bool opt_using_transactions;
 bool volatile abort_loop;
-bool volatile shutdown_in_progress;
 uint volatile global_disable_checkpoint;
 #if defined(_WIN32) && !defined(EMBEDDED_LIBRARY)
 ulong slow_start_timeout;
@@ -1847,7 +1846,6 @@ void kill_mysql(THD *thd)
   kill(current_pid, MYSQL_KILL_SIGNAL);
 #endif
   DBUG_PRINT("quit",("After pthread_kill"));
-  shutdown_in_progress=1;			// Safety if kill didn't work
   DBUG_VOID_RETURN;
 }
 
@@ -1887,7 +1885,6 @@ extern "C" void unireg_abort(int exit_code)
       wsrep threads here, we can only diconnect from service
     */
     wsrep_close_client_connections(FALSE);
-    shutdown_in_progress= 1;
     Wsrep_server_state::instance().disconnect();
     WSREP_INFO("Service disconnected.");
     wsrep_close_threads(NULL); /* this won't close all threads */
@@ -3245,13 +3242,8 @@ pthread_handler_t signal_hand(void *arg __attribute__((unused)))
   {
     int error;
     int origin;
-    if (shutdown_in_progress && !abort_loop)
-    {
-      sig= SIGTERM;
-      error=0;
-    }
-    else
-      while ((error= my_sigwait(&set, &sig, &origin)) == EINTR) /* no-op */;
+
+    while ((error= my_sigwait(&set, &sig, &origin)) == EINTR) /* no-op */;
     if (cleanup_done)
     {
       DBUG_PRINT("quit",("signal_handler: calling my_thread_end()"));
@@ -8041,7 +8033,7 @@ static int mysql_init_variables(void)
   opt_endinfo= using_udf_functions= 0;
   opt_using_transactions= 0;
   abort_loop= select_thread_in_use= signal_thread_in_use= 0;
-  shutdown_in_progress= grant_option= 0;
+  grant_option= 0;
   aborted_threads= aborted_connects= 0;
   subquery_cache_miss= subquery_cache_hit= 0;
   delayed_insert_threads= delayed_insert_writes= delayed_rows_in_use= 0;
