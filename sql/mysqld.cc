@@ -345,7 +345,6 @@ PSI_statement_info stmt_info_rpl;
 static bool lower_case_table_names_used= 0;
 static bool max_long_data_size_used= false;
 static bool volatile select_thread_in_use, signal_thread_in_use;
-static volatile bool ready_to_exit;
 static my_bool opt_debugging= 0, opt_external_locking= 0, opt_console= 0;
 static my_bool opt_short_log_format= 0, opt_silent_startup= 0;
 bool my_disable_leak_check= false;
@@ -692,7 +691,6 @@ pthread_key(THD*, THR_THD);
 /*
   LOCK_thread_count protects the following variables:
   thread_count		Number of threads with THD that servers queries.
-  ready_to_exit
 */
 mysql_mutex_t LOCK_thread_count;
 
@@ -759,7 +757,6 @@ char *opt_binlog_index_name=0;
 
 /* Static variables */
 
-static volatile sig_atomic_t kill_in_progress;
 my_bool opt_stack_trace;
 my_bool opt_expect_abort= 0, opt_bootstrap= 0;
 static my_bool opt_myisam_log;
@@ -1508,7 +1505,6 @@ static int fix_paths(void);
 void handle_connections_sockets();
 #endif
 
-pthread_handler_t kill_server_thread(void *arg);
 static bool read_init_file(char *file_name);
 pthread_handler_t handle_slave(void *arg);
 static void clean_up(bool print_message);
@@ -1633,17 +1629,11 @@ static my_bool kill_all_threads_once_again(THD *thd, void *)
 }
 
 
-static void close_connections(void)
+static void kill_main_thread(void)
 {
 #ifdef EXTRA_DEBUG
   int count=0;
 #endif
-  DBUG_ENTER("close_connections");
-
-  /* Clear thread cache */
-  kill_cached_threads++;
-  flush_thread_cache();
-
 
   /* kill connection thread */
 #if !defined(__WIN__)
@@ -1677,7 +1667,16 @@ static void close_connections(void)
   }
   mysql_mutex_unlock(&LOCK_start_thread);
 #endif /* __WIN__ */
+}
 
+
+static void close_connections(void)
+{
+  DBUG_ENTER("close_connections");
+
+  /* Clear thread cache */
+  kill_cached_threads++;
+  flush_thread_cache();
 
   /* Abort listening to new connections */
   DBUG_PRINT("quit",("Closing sockets"));
@@ -1851,77 +1850,6 @@ void kill_mysql(THD *thd)
   shutdown_in_progress=1;			// Safety if kill didn't work
   DBUG_VOID_RETURN;
 }
-
-/**
-  Force server down. Kill all connections and threads and exit.
-
-  @param  sig       Signal number that caused kill_server to be called.
-
-  @note
-    A signal number of 0 mean that the function was not called
-    from a signal handler and there is thus no signal to block
-    or stop, we just want to kill the server.
-*/
-
-static void kill_server(int sig)
-{
-  DBUG_ENTER("kill_server");
-#ifndef EMBEDDED_LIBRARY
-  // if there is a signal during the kill in progress, ignore the other
-  if (kill_in_progress)				// Safety
-  {
-    DBUG_VOID_RETURN;
-  }
-  kill_in_progress=TRUE;
-  abort_loop=1;					// This should be set
-  if (sig != 0) // 0 is not a valid signal number
-    my_sigset(sig, SIG_IGN);                    /* purify inspected */
-  if (sig == MYSQL_KILL_SIGNAL || sig == 0)
-  {
-    char *user= (char *) my_atomic_loadptr((void**) &shutdown_user);
-    sql_print_information(ER_DEFAULT(ER_NORMAL_SHUTDOWN), my_progname,
-                          user ? user : "unknown");
-    if (user)
-      my_free(user);
-  }
-  else
-    sql_print_error(ER_DEFAULT(ER_GOT_SIGNAL),my_progname,sig); /* purecov: inspected */
-
-#ifdef WITH_WSREP
-  /* Stop wsrep threads in case they are running. */
-  if (wsrep_running_threads > 0)
-  {
-    wsrep_shutdown_replication();
-  }
-#endif
-
-  close_connections();
-
-  if (sig != MYSQL_KILL_SIGNAL &&
-      sig != 0)
-    unireg_abort(1);				/* purecov: inspected */
-  else
-  {
-    clean_up(1);
-    sd_notify(0, "STATUS=MariaDB server is down");
-  }
-
-#endif /* EMBEDDED_LIBRARY*/
-
-   DBUG_VOID_RETURN;
-}
-
-
-#if defined(USE_ONE_SIGNAL_HAND)
-pthread_handler_t kill_server_thread(void *arg __attribute__((unused)))
-{
-  my_thread_init();				// Initialize new thread
-  kill_server(0);
-  my_thread_end();
-  pthread_exit(0);
-  return 0;
-}
-#endif
 
 
 extern "C" sig_handler print_signal_warning(int sig)
@@ -2127,16 +2055,6 @@ static void clean_up(bool print_message)
   logger.cleanup_end();
   sys_var_end();
   free_charsets();
-
-  /*
-    Signal mysqld_main() that it can exit
-    do the broadcast inside the lock to ensure that my_end() is not called
-    during broadcast()
-  */
-  mysql_mutex_lock(&LOCK_thread_count);
-  ready_to_exit=1;
-  mysql_cond_broadcast(&COND_thread_count);
-  mysql_mutex_unlock(&LOCK_thread_count);
 
   my_free(const_cast<char*>(log_bin_basename));
   my_free(const_cast<char*>(log_bin_index));
@@ -3260,6 +3178,18 @@ static void start_signal_handler(void)
 }
 
 
+#if defined(USE_ONE_SIGNAL_HAND)
+pthread_handler_t kill_server_thread(void *arg __attribute__((unused)))
+{
+  my_thread_init();				// Initialize new thread
+  kill_main_thread();
+  my_thread_end();
+  pthread_exit(0);
+  return 0;
+}
+#endif
+
+
 /** This threads handles all signals and alarms. */
 /* ARGSUSED */
 pthread_handler_t signal_hand(void *arg __attribute__((unused)))
@@ -3356,7 +3286,8 @@ pthread_handler_t signal_hand(void *arg __attribute__((unused)))
           sql_print_error("Can't create thread to kill server (errno= %d)",
                           error);
 #else
-	kill_server(sig);	// MIT THREAD has a alarm thread
+        my_sigset(sig, SIG_IGN);
+        kill_main_thread(); // MIT THREAD has a alarm thread
 #endif
       }
       break;
@@ -5812,14 +5743,7 @@ int mysqld_main(int argc, char **argv)
   {
     abort_loop=1;
     select_thread_in_use=0;
-
-    (void) pthread_kill(signal_thread, MYSQL_KILL_SIGNAL);
-
-    delete_pid_file(MYF(MY_WME));
-
-    if (mysql_socket_getfd(unix_sock) != INVALID_SOCKET)
-      unlink(mysqld_unix_port);
-    exit(1);
+    unireg_abort(1);
   }
 
   if (!opt_noacl)
@@ -5872,7 +5796,7 @@ int mysqld_main(int argc, char **argv)
   {
     select_thread_in_use= 0;                    // Allow 'kill' to work
     bootstrap(mysql_stdin);
-    if (!kill_in_progress)
+    if (!abort_loop)
       unireg_abort(bootstrap_error ? 1 : 0);
     else
     {
@@ -5952,33 +5876,45 @@ int mysqld_main(int argc, char **argv)
 
 #ifdef _WIN32
   handle_connections_win();
-  kill_server(0);
+  abort_loop= 1;
 #else
   handle_connections_sockets();
+
+  mysql_mutex_lock(&LOCK_start_thread);
+  select_thread_in_use=0;
+  mysql_cond_broadcast(&COND_start_thread);
+  mysql_mutex_unlock(&LOCK_start_thread);
 #endif /* _WIN32 */
+
+  /* Shutdown requested */
+  char *user= (char *) my_atomic_loadptr((void**) &shutdown_user);
+  sql_print_information(ER_DEFAULT(ER_NORMAL_SHUTDOWN), my_progname,
+                        user ? user : "unknown");
+  if (user)
+    my_free(user);
+
+#ifdef WITH_WSREP
+  /* Stop wsrep threads in case they are running. */
+  if (wsrep_running_threads > 0)
+  {
+    wsrep_shutdown_replication();
+  }
+#endif
+
+  close_connections();
+
+  clean_up(1);
+  sd_notify(0, "STATUS=MariaDB server is down");
 
   /* (void) pthread_attr_destroy(&connection_attrib); */
 
   DBUG_PRINT("quit",("Exiting main thread"));
-
-#ifndef __WIN__
-  mysql_mutex_lock(&LOCK_start_thread);
-  select_thread_in_use=0;			// For close_connections
-  mysql_cond_broadcast(&COND_start_thread);
-  mysql_mutex_unlock(&LOCK_start_thread);
-#endif /* __WIN__ */
 
   /*
     Disable the main thread instrumentation,
     to avoid recording events during the shutdown.
   */
   PSI_CALL_delete_current_thread();
-
-  /* Wait until cleanup is done */
-  mysql_mutex_lock(&LOCK_thread_count);
-  while (!ready_to_exit)
-    mysql_cond_wait(&COND_thread_count, &LOCK_thread_count);
-  mysql_mutex_unlock(&LOCK_thread_count);
 
 #if defined(__WIN__) && !defined(EMBEDDED_LIBRARY)
   if (start_mode)
@@ -8097,7 +8033,6 @@ static int mysql_init_variables(void)
   opt_bootstrap= opt_myisam_log= 0;
   disable_log_notes= 0;
   mqh_used= 0;
-  kill_in_progress= 0;
   cleanup_done= 0;
   test_flags= select_errors= dropping_tables= ha_open_options=0;
   thread_count= kill_cached_threads= wake_thread= 0;
@@ -8106,7 +8041,7 @@ static int mysql_init_variables(void)
   opt_endinfo= using_udf_functions= 0;
   opt_using_transactions= 0;
   abort_loop= select_thread_in_use= signal_thread_in_use= 0;
-  ready_to_exit= shutdown_in_progress= grant_option= 0;
+  shutdown_in_progress= grant_option= 0;
   aborted_threads= aborted_connects= 0;
   subquery_cache_miss= subquery_cache_hit= 0;
   delayed_insert_threads= delayed_insert_writes= delayed_rows_in_use= 0;
