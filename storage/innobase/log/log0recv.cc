@@ -3470,7 +3470,7 @@ skip_apply:
 			break;
 		}
 		if (end_lsn >= checkpoint_lsn) {
-			contiguous_lsn = end_lsn;
+			contiguous_lsn = checkpoint_lsn;
 			break;
 		}
 		recv_sys->found_corrupt_log = true;
