@@ -683,6 +683,8 @@ SHOW_COMP_OPTION have_crypt, have_compress;
 SHOW_COMP_OPTION have_profiling;
 SHOW_COMP_OPTION have_openssl;
 
+static std::atomic<char*> shutdown_user;
+
 /* Thread specific variables */
 
 pthread_key(THD*, THR_THD);
@@ -1628,14 +1630,26 @@ static my_bool kill_all_threads_once_again(THD *thd, void *)
 }
 
 
-static void kill_main_thread(void)
+/**
+  Kills main thread.
+
+  @note this function is respoinsible for setting abort_loop and breaking
+  poll() in main thread. Shutdown as such is supposed to be performed by main
+  thread itself.
+*/
+
+static void kill_main_thread()
 {
 #ifdef EXTRA_DEBUG
   int count=0;
 #endif
 
-  /* kill connection thread */
-#if !defined(__WIN__)
+  abort_loop= 1;
+
+#if defined(__WIN__)
+  if (!SetEvent(hEventShutdown))
+    DBUG_PRINT("error", ("Got error: %ld from SetEvent", GetLastError()));
+#else
   DBUG_PRINT("quit", ("waiting for select thread: %lu",
                       (ulong)select_thread));
 
@@ -1666,6 +1680,33 @@ static void kill_main_thread(void)
   }
   mysql_mutex_unlock(&LOCK_start_thread);
 #endif /* __WIN__ */
+}
+
+
+/**
+  A wrapper around kill_main_thrad().
+
+  Sets shutdown user. This function may be called by multiple threads
+  concurrently, thus it performs safe update of shutdown_user
+  (first thread wins).
+*/
+
+void kill_mysql(THD *thd)
+{
+  char user_host_buff[MAX_USER_HOST_SIZE + 1];
+  char *user, *expected_shutdown_user= 0;
+
+  make_user_name(thd, user_host_buff);
+
+  if ((user= my_strdup(user_host_buff, MYF(0))) &&
+      !shutdown_user.compare_exchange_strong(expected_shutdown_user,
+                                             user,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed))
+  {
+    my_free(user);
+  }
+  kill_main_thread();
 }
 
 
@@ -1797,57 +1838,6 @@ static void close_server_sock()
 }
 
 #endif /*EMBEDDED_LIBRARY*/
-
-
-/**
-  Set shutdown user
-
-  @note this function may be called by multiple threads concurrently, thus
-  it performs safe update of shutdown_user (first thread wins).
-*/
-
-static volatile char *shutdown_user;
-static void set_shutdown_user(THD *thd)
-{
-  char user_host_buff[MAX_USER_HOST_SIZE + 1];
-  char *user, *expected_shutdown_user= 0;
-
-  make_user_name(thd, user_host_buff);
-
-  if ((user= my_strdup(user_host_buff, MYF(0))) &&
-      !my_atomic_casptr((void **) &shutdown_user,
-                        (void **) &expected_shutdown_user, user))
-    my_free(user);
-}
-
-
-void kill_mysql(THD *thd)
-{
-  DBUG_ENTER("kill_mysql");
-
-  if (thd)
-    set_shutdown_user(thd);
-
-#if defined(__WIN__)
-#if !defined(EMBEDDED_LIBRARY)
-  {
-    if (!SetEvent(hEventShutdown))
-    {
-      DBUG_PRINT("error",("Got error: %ld from SetEvent",GetLastError()));
-    }
-  }
-#endif
-#elif defined(HAVE_PTHREAD_KILL)
-  if (pthread_kill(signal_thread, MYSQL_KILL_SIGNAL))
-  {
-    DBUG_PRINT("error",("Got error %d from pthread_kill",errno)); /* purecov: inspected */
-  }
-#else
-  kill(current_pid, MYSQL_KILL_SIGNAL);
-#endif
-  DBUG_PRINT("quit",("After pthread_kill"));
-  DBUG_VOID_RETURN;
-}
 
 
 extern "C" sig_handler print_signal_warning(int sig)
@@ -2578,7 +2568,6 @@ void close_connection(THD *thd, uint sql_errno)
   mysql_audit_notify_connection_disconnect(thd, sql_errno);
   DBUG_VOID_RETURN;
 }
-#endif /* EMBEDDED_LIBRARY */
 
 
 /** Called when mysqld is aborted with ^C */
@@ -2586,11 +2575,12 @@ void close_connection(THD *thd, uint sql_errno)
 extern "C" sig_handler end_mysqld_signal(int sig __attribute__((unused)))
 {
   DBUG_ENTER("end_mysqld_signal");
-  /* Don't call kill_mysql() if signal thread is not running */
+  /* Don't kill if signal thread is not running */
   if (signal_thread_in_use)
-    kill_mysql();                          // Take down mysqld nicely
+    kill_main_thread();                         // Take down mysqld nicely
   DBUG_VOID_RETURN;				/* purecov: deadcode */
 }
+#endif /* EMBEDDED_LIBRARY */
 
 /*
   Decrease number of connections
@@ -2836,7 +2826,7 @@ static BOOL WINAPI console_event_handler( DWORD type )
      */
 #ifndef EMBEDDED_LIBRARY
      if(hEventShutdown)
-       kill_mysql();
+       kill_main_thread();
      else
 #endif
        sql_print_warning("CTRL-C ignored during startup");
@@ -3266,7 +3256,6 @@ pthread_handler_t signal_hand(void *arg __attribute__((unused)))
       DBUG_PRINT("info",("Got signal: %d  abort_loop: %d",sig,abort_loop));
       if (!abort_loop)
       {
-	abort_loop=1;				// mark abort for threads
         /* Delete the instrumentation for the signal thread */
         PSI_CALL_delete_current_thread();
 #ifdef USE_ONE_SIGNAL_HAND
@@ -5732,11 +5721,7 @@ int mysqld_main(int argc, char **argv)
 
   if (mysql_rm_tmp_tables() || acl_init(opt_noacl) ||
       my_tz_init((THD *)0, default_tz_name, opt_bootstrap))
-  {
-    abort_loop=1;
-    select_thread_in_use=0;
     unireg_abort(1);
-  }
 
   if (!opt_noacl)
     (void) grant_init();
@@ -5868,7 +5853,6 @@ int mysqld_main(int argc, char **argv)
 
 #ifdef _WIN32
   handle_connections_win();
-  abort_loop= 1;
 #else
   handle_connections_sockets();
 
@@ -5879,7 +5863,7 @@ int mysqld_main(int argc, char **argv)
 #endif /* _WIN32 */
 
   /* Shutdown requested */
-  char *user= (char *) my_atomic_loadptr((void**) &shutdown_user);
+  char *user= shutdown_user.load(std::memory_order_relaxed);
   sql_print_information(ER_DEFAULT(ER_NORMAL_SHUTDOWN), my_progname,
                         user ? user : "unknown");
   if (user)

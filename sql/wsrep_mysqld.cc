@@ -2406,7 +2406,7 @@ void wsrep_kill_mysql(THD *thd)
     if (!abort_loop)
     {
       WSREP_INFO("starting shutdown");
-      kill_mysql();
+      kill_mysql(thd);
     }
   }
   else
