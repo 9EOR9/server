@@ -1,0 +1,74 @@
+--source include/have_innodb.inc
+
+#
+# MDEV-18707 Server crash in my_hash_sort_bin, ASAN heap-use-after-free in Field::is_null, server hang, corrupted double-linked list
+#
+create table t1 (a int, b int, c int, d int, e int);
+insert into t1 () values
+(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),();
+select * into outfile 'load.data' from t1;
+create temporary table tmp (a varchar(1024), b int, c int, d int, e linestring, unique (e));
+load data infile 'load.data' into table tmp;
+delete from tmp;
+drop table t1;
+--let $datadir= `SELECT @@datadir`
+--remove_file $datadir/test/load.data
+
+#
+# MDEV-18712 InnoDB indexes are inconsistent with what defined in .frm for table after rebuilding table with index on blob
+#
+create table t1 (b blob) engine=innodb;
+alter table t1 add unique (b);
+alter table t1 force;
+show create table t1;
+drop table t1;
+
+#
+# MDEV-18713 Assertion `strcmp(share->unique_file_name,filename) || share->last_version' failed in test_if_reopen upon REPLACE into table with key on blob
+#
+create table t1 (pk int, b blob, primary key(pk), unique(b)) engine=myisam;
+insert into t1 values (1,'foo');
+replace into t1 (pk) values (1);
+alter table t1 force;
+replace into t1 (pk) values (1);
+drop table t1;
+
+#
+# MDEV-18722 Assertion `templ->mysql_null_bit_mask' failed in row_sel_store_mysql_rec upon modifying indexed column into blob
+#
+create table t1 (t time, unique(t)) engine=innodb;
+insert into t1 values (null),(null);
+alter ignore table t1 modify t text not null default '';
+drop table t1;
+
+#
+# MDEV-18720 Assertion `inited==NONE' failed in ha_index_init upon update on versioned table with key on blob
+#
+create table t1 ( pk int, f text, primary key (pk), unique(f)) with system versioning;
+insert into t1 values (1,'foo');
+update t1 set f = 'bar';
+select * from t1;
+update t1 set f = 'foo';
+select * from t1;
+select pk, f, row_end > DATE'2030-01-01' from t1 for system_time all;
+drop table t1;
+
+#
+# MDEV-18747 InnoDB: Failing assertion: table->get_ref_count() == 0 upon dropping temporary table with unique blob
+#
+create temporary table t1 (f blob, unique(f)) engine=innodb;
+insert into t1 values (1);
+replace into t1 values (1);
+drop table t1;
+
+#
+# MDEV-18748 REPLACE doesn't work with unique blobs on MyISAM table
+#
+create table t (b blob, unique(b)) engine=myisam;
+insert into t values ('foo');
+replace into t values ('foo');
+drop table t;

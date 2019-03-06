@@ -1714,6 +1714,46 @@ bool Item_func_mod::fix_length_and_dec()
   DBUG_RETURN(FALSE);
 }
 
+static void calc_hash_for_unique(ulong &nr1, ulong &nr2, String *str)
+{
+  CHARSET_INFO *cs;
+  uchar l[4];
+  int4store(l, str->length());
+  cs= str->charset();
+  cs->coll->hash_sort(cs, l, sizeof(l), &nr1, &nr2);
+  cs= str->charset();
+  cs->coll->hash_sort(cs, (uchar *)str->ptr(), str->length(), &nr1, &nr2);
+}
+
+longlong  Item_func_hash::val_int()
+{
+  DBUG_EXECUTE_IF("same_long_unique_hash", return 9;);
+  unsigned_flag= true;
+  ulong nr1= 1,nr2= 4;
+  String * str;
+  for(uint i= 0;i<arg_count;i++)
+  {
+    str = args[i]->val_str();
+    if(args[i]->null_value)
+    {
+      null_value= 1;
+      return 0;
+    }
+   calc_hash_for_unique(nr1, nr2, str);
+  }
+  null_value= 0;
+  return   (longlong)nr1;
+}
+
+
+bool Item_func_hash::fix_length_and_dec()
+{
+  decimals= 0;
+  max_length= 8;
+  return false;
+}
+
+
 
 double Item_func_neg::real_op()
 {
@@ -4477,7 +4517,7 @@ bool Item_func_set_user_var::register_field_in_bitmap(void *arg)
     true    failure
 */
 
-static bool
+bool
 update_hash(user_var_entry *entry, bool set_null, void *ptr, size_t length,
             Item_result type, CHARSET_INFO *cs,
             bool unsigned_arg)
@@ -6330,17 +6370,17 @@ Item_func_sp::fix_fields(THD *thd, Item **ref)
 
   if (m_sp->agg_type() == GROUP_AGGREGATE)
   {
-    List<Item> list;
-    list.empty();
-    for (uint i=0; i < arg_count; i++)
-      list.push_back(*(args+i));
-
     Item_sum_sp *item_sp;
     Query_arena *arena, backup;
     arena= thd->activate_stmt_arena_if_needed(&backup);
 
     if (arg_count)
+    {
+      List<Item> list;
+      for (uint i= 0; i < arg_count; i++)
+        list.push_back(args[i]);
       item_sp= new (thd->mem_root) Item_sum_sp(thd, context, m_name, sp, list);
+    }
     else
       item_sp= new (thd->mem_root) Item_sum_sp(thd, context, m_name, sp);
 
@@ -6354,7 +6394,6 @@ Item_func_sp::fix_fields(THD *thd, Item **ref)
     if (err)
       DBUG_RETURN(TRUE);
 
-    list.empty();
     DBUG_RETURN(FALSE);
   }
 

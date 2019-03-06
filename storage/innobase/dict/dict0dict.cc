@@ -2118,10 +2118,9 @@ dict_index_too_big_for_tree(
 
 	comp = dict_table_is_comp(table);
 
-	const page_size_t page_size(dict_tf_get_page_size(table->flags));
+	const ulint zip_size = dict_tf_get_zip_size(table->flags);
 
-	if (page_size.is_compressed()
-	    && page_size.physical() < srv_page_size) {
+	if (zip_size && zip_size < srv_page_size) {
 		/* On a compressed page, two records must fit in the
 		uncompressed page modification log. On compressed pages
 		with size.physical() == srv_page_size,
@@ -2132,7 +2131,7 @@ dict_index_too_big_for_tree(
 		number in the page modification log.  The maximum
 		allowed node pointer size is half that. */
 		page_rec_max = page_zip_empty_size(new_index->n_fields,
-						   page_size.physical());
+						   zip_size);
 		if (page_rec_max) {
 			page_rec_max--;
 		}
@@ -4296,7 +4295,6 @@ dict_create_foreign_constraints_low(
 	const char*	create_table_name;
 	const char*	orig;
 	char	create_name[MAX_TABLE_NAME_LEN + 1];
-	char	operation[8];
 
 	ut_ad(!srv_read_only_mode);
 	ut_ad(mutex_own(&dict_sys->mutex));
@@ -4307,40 +4305,32 @@ dict_create_foreign_constraints_low(
 	orig = ptr;
 	ptr = dict_accept(cs, ptr, "ALTER", &success);
 
-	strcpy((char *)operation, success ? "Alter " : "Create ");
+	const char* const operation = success ? "Alter " : "Create ";
 
 	if (!success) {
 		orig = ptr;
 		ptr = dict_scan_to(ptr, "CREATE");
 		ptr = dict_scan_to(ptr, "TABLE");
 		ptr = dict_accept(cs, ptr, "TABLE", &success);
+		create_table_name = NULL;
 
 		if (success) {
 			ptr = dict_scan_table_name(cs, ptr, &table_to_create, name,
-					&success, heap, &create_table_name);
+						   &success, heap, &create_table_name);
 		}
 
-		if (success) {
-			char *bufend;
-			bufend = innobase_convert_name((char *)create_name, MAX_TABLE_NAME_LEN,
-					create_table_name, strlen(create_table_name),
-					trx->mysql_thd);
-			create_name[bufend-create_name]='\0';
-			ptr = orig;
-		} else {
-			char *bufend;
-			ptr = orig;
-			bufend = innobase_convert_name((char *)create_name, MAX_TABLE_NAME_LEN,
-					name, strlen(name), trx->mysql_thd);
-			create_name[bufend-create_name]='\0';
-		}
-
-		goto loop;
+		ptr = orig;
+		const char* n = create_table_name ? create_table_name : name;
+		char *bufend = innobase_convert_name(create_name, MAX_TABLE_NAME_LEN,
+						     n, strlen(n), trx->mysql_thd);
+		create_name[bufend-create_name] = '\0';
+	} else {
+		strncpy(create_name, name, sizeof create_name);
+		create_name[(sizeof create_name) - 1] = '\0';
 	}
 
 	if (table == NULL) {
 		mutex_enter(&dict_foreign_err_mutex);
-		dict_foreign_error_report_low(ef, create_name);
 		dict_foreign_error_report_low(ef, create_name);
 		fprintf(ef, "%s table %s with foreign key constraint"
 			" failed. Table %s not found from data dictionary."
@@ -4376,19 +4366,13 @@ dict_create_foreign_constraints_low(
 	ptr = dict_scan_table_name(cs, ptr, &table_to_alter, name,
 				   &success, heap, &referenced_table_name);
 
-	if (table_to_alter) {
-		char *bufend;
-		bufend = innobase_convert_name((char *)create_name, MAX_TABLE_NAME_LEN,
-				table_to_alter->name.m_name, strlen(table_to_alter->name.m_name),
-				trx->mysql_thd);
+	{
+		const char* n = table_to_alter
+			? table_to_alter->name.m_name : referenced_table_name;
+		char* bufend = innobase_convert_name(
+			create_name, MAX_TABLE_NAME_LEN, n, strlen(n),
+			trx->mysql_thd);
 		create_name[bufend-create_name]='\0';
-	} else {
-		char *bufend;
-		bufend = innobase_convert_name((char *)create_name, MAX_TABLE_NAME_LEN,
-				referenced_table_name, strlen(referenced_table_name),
-				trx->mysql_thd);
-		create_name[bufend-create_name]='\0';
-
 	}
 
 	if (!success) {
@@ -7072,53 +7056,4 @@ dict_space_get_id(
 	rw_lock_x_unlock(dict_operation_lock);
 
 	return(id);
-}
-
-/** Determine the extent size (in pages) for the given table
-@param[in]	table	the table whose extent size is being
-			calculated.
-@return extent size in pages (256, 128 or 64) */
-ulint
-dict_table_extent_size(
-	const dict_table_t*	table)
-{
-	const ulint	mb_1 = 1024 * 1024;
-	const ulint	mb_2 = 2 * mb_1;
-	const ulint	mb_4 = 4 * mb_1;
-
-	page_size_t	page_size = dict_table_page_size(table);
-	ulint	pages_in_extent = FSP_EXTENT_SIZE;
-
-	if (page_size.is_compressed()) {
-
-		ulint	disk_page_size	= page_size.physical();
-
-		switch (disk_page_size) {
-		case 1024:
-			pages_in_extent = mb_1/1024;
-			break;
-		case 2048:
-			pages_in_extent = mb_1/2048;
-			break;
-		case 4096:
-			pages_in_extent = mb_1/4096;
-			break;
-		case 8192:
-			pages_in_extent = mb_1/8192;
-			break;
-		case 16384:
-			pages_in_extent = mb_1/16384;
-			break;
-		case 32768:
-			pages_in_extent = mb_2/32768;
-			break;
-		case 65536:
-			pages_in_extent = mb_4/65536;
-			break;
-		default:
-			ut_ad(0);
-		}
-	}
-
-	return(pages_in_extent);
 }

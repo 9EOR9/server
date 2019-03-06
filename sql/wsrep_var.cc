@@ -430,6 +430,12 @@ bool wsrep_reject_queries_update(sys_var *self, THD* thd, enum_var_type type)
     return false;
 }
 
+bool wsrep_debug_update(sys_var *self, THD* thd, enum_var_type type)
+{
+    Wsrep_server_state::instance().debug_log_level(wsrep_debug);
+    return false;
+}
+
 static int wsrep_cluster_address_verify (const char* cluster_address_str)
 {
   /* There is no predefined address format, it depends on provider. */
@@ -472,23 +478,24 @@ bool wsrep_cluster_address_update (sys_var *self, THD* thd, enum_var_type type)
      Note: releasing LOCK_global_system_variables may cause race condition, if 
      there can be several concurrent clients changing wsrep_provider
   */
+  WSREP_DEBUG("wsrep_cluster_address_update: %s", wsrep_cluster_address);
   mysql_mutex_unlock(&LOCK_global_system_variables);
   wsrep_stop_replication(thd);
-
 
   if (wsrep_start_replication())
   {
     wsrep_create_rollbacker();
     wsrep_create_appliers(wsrep_slave_threads);
   }
-
   /* locking order to be enforced is:
      1. LOCK_global_system_variables
-     2. LOCK_wsrep_slave_threads
+     2. LOCK_wsrep_cluster_config
+     => have to juggle mutexes to comply with this
   */
-  mysql_mutex_unlock(&LOCK_wsrep_slave_threads);
+
+  mysql_mutex_unlock(&LOCK_wsrep_cluster_config);
   mysql_mutex_lock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_wsrep_slave_threads);
+  mysql_mutex_lock(&LOCK_wsrep_cluster_config);
 
   return false;
 }
@@ -751,7 +758,7 @@ static int show_var_cmp(const void *var1, const void *var2)
 {
   return strcasecmp(((SHOW_VAR*)var1)->name, ((SHOW_VAR*)var2)->name);
 }
-#endif /* UNUSED */
+
 /*
  * Status variables stuff below
  */
@@ -774,6 +781,7 @@ wsrep_assign_to_mysql (SHOW_VAR* mysql, wsrep_stats_var* wsrep_var)
     break;
   }
 }
+#endif /* UNUSED */
 
 #if DYNAMIC
 // somehow this mysql status thing works only with statically allocated arrays.

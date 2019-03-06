@@ -29,6 +29,8 @@
 #include "sql_derived.h"       // mysql_handle_derived
 #include "sql_cte.h"
 #include "sql_select.h"        // Virtual_tmp_table
+#include "opt_trace.h"
+#include "my_json_writer.h"
 
 #ifdef USE_PRAGMA_IMPLEMENTATION
 #pragma implementation
@@ -536,6 +538,7 @@ sp_head::sp_head(sp_package *parent, const Sp_handler *sph)
   my_hash_init(&m_sptabs, system_charset_info, 0, 0, 0, sp_table_key, 0, 0);
   my_hash_init(&m_sroutines, system_charset_info, 0, 0, 0, sp_sroutine_key,
                0, 0);
+  m_security_ctx.init();
 
   DBUG_VOID_RETURN;
 }
@@ -1145,6 +1148,8 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
   /* this 7*STACK_MIN_SIZE is a complex matter with a long history (see it!) */
   if (check_stack_overrun(thd, 7 * STACK_MIN_SIZE, (uchar*)&old_packet))
     DBUG_RETURN(TRUE);
+
+  opt_trace_disable_if_no_security_context_access(thd);
 
   /* init per-instruction memroot */
   init_sql_alloc(&execute_mem_root, "per_instruction_memroot",
@@ -1982,6 +1987,7 @@ sp_head::execute_function(THD *thd, Item **argp, uint argcount,
     thd->variables.option_bits&= ~OPTION_BIN_LOG;
   }
 
+  opt_trace_disable_if_no_stored_proc_func_access(thd, this);
   /*
     Switch to call arena/mem_root so objects like sp_cursor or
     Item_cache holders for case expressions can be allocated on it.
@@ -2272,6 +2278,7 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
     err_status= set_routine_security_ctx(thd, this, &save_security_ctx);
 #endif
 
+  opt_trace_disable_if_no_stored_proc_func_access(thd, this);
   if (!err_status)
   {
     err_status= execute(thd, TRUE);
@@ -3297,6 +3304,13 @@ sp_lex_keeper::reset_lex_and_exec_core(THD *thd, uint *nextp,
     thd->lex->safe_to_cache_query= 0;
 #endif
 
+  Opt_trace_start ots(thd,  m_lex->query_tables,
+                        SQLCOM_SELECT, &m_lex->var_list,
+                        NULL, 0,
+                        thd->variables.character_set_client);
+
+  Json_writer_object trace_command(thd);
+  Json_writer_array trace_command_steps(thd, "steps");
   if (open_tables)
     res= check_dependencies_in_with_clauses(m_lex->with_clauses_list) ||
          instr->exec_open_and_lock_tables(thd, m_lex->query_tables);

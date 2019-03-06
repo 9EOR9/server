@@ -32,6 +32,7 @@ typedef struct st_mysql_show_var SHOW_VAR;
 #include <sql_priv.h>
 #include "mdl.h"
 #include "sql_table.h"
+#include "wsrep_mysqld_c.h"
 
 #include "wsrep/provider.hpp"
 #include "wsrep/streaming_context.hpp"
@@ -64,7 +65,7 @@ extern const char* wsrep_data_home_dir;
 extern const char* wsrep_dbug_option;
 extern long        wsrep_slave_threads;
 extern int         wsrep_slave_count_change;
-extern MYSQL_PLUGIN_IMPORT my_bool wsrep_debug;
+extern ulong       wsrep_debug;
 extern my_bool     wsrep_convert_LOCK_to_trx;
 extern ulong       wsrep_retry_autocommit;
 extern my_bool     wsrep_auto_increment_control;
@@ -75,7 +76,7 @@ extern ulong       wsrep_max_ws_size;
 extern ulong       wsrep_max_ws_rows;
 extern const char* wsrep_notify_cmd;
 extern my_bool     wsrep_certify_nonPK;
-extern long int        wsrep_protocol_version;
+extern long int    wsrep_protocol_version;
 extern ulong       wsrep_forced_binlog_format;
 extern my_bool     wsrep_desync;
 extern ulong       wsrep_reject_queries;
@@ -300,10 +301,11 @@ extern int wsrep_replaying;
 extern mysql_mutex_t LOCK_wsrep_replaying;
 extern mysql_cond_t  COND_wsrep_replaying;
 extern mysql_mutex_t LOCK_wsrep_slave_threads;
+extern mysql_cond_t  COND_wsrep_slave_threads;
+extern mysql_mutex_t LOCK_wsrep_cluster_config;
 extern mysql_mutex_t LOCK_wsrep_desync;
 extern mysql_mutex_t LOCK_wsrep_SR_pool;
 extern mysql_mutex_t LOCK_wsrep_SR_store;
-extern mysql_mutex_t LOCK_wsrep_thd_pool;
 extern mysql_mutex_t LOCK_wsrep_config_state;
 extern my_bool       wsrep_emulate_bin_log;
 extern int           wsrep_to_isolation;
@@ -327,10 +329,11 @@ extern PSI_cond_key  key_COND_wsrep_sst_thread;
 extern PSI_mutex_key key_LOCK_wsrep_replaying;
 extern PSI_cond_key  key_COND_wsrep_replaying;
 extern PSI_mutex_key key_LOCK_wsrep_slave_threads;
+extern PSI_cond_key  key_COND_wsrep_slave_threads;
+extern PSI_mutex_key key_LOCK_wsrep_cluster_config;
 extern PSI_mutex_key key_LOCK_wsrep_desync;
 extern PSI_mutex_key key_LOCK_wsrep_SR_pool;
 extern PSI_mutex_key key_LOCK_wsrep_SR_store;
-extern PSI_mutex_key key_LOCK_wsrep_thd_pool;
 extern PSI_mutex_key key_LOCK_wsrep_global_seqno;
 extern PSI_mutex_key key_LOCK_wsrep_thd_queue;
 extern PSI_cond_key  key_COND_wsrep_thd_queue;
@@ -443,15 +446,6 @@ bool wsrep_provider_is_SR_capable();
  * @return Zero in case of success, non-zero in case of failure.
  */
 int wsrep_ordered_commit_if_no_binlog(THD*, bool);
-
-/**
- * Commit the current transaction with the
- * MySQL "Transaction Coordinator Log" (see `class TC_LOG` in sql/log.h).
- * Calling this function will generate and assign a new wsrep transaction id
- * for `thd`.
- * @return WSREP_OK on success or other WSREP_* error code on failure
- */
-wsrep_status_t wsrep_tc_log_commit(THD* thd);
 
 /**
  * Initialize WSREP server instance.

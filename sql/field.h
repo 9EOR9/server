@@ -540,7 +540,7 @@ public:
   bool stored_in_db;
   bool utf8;                                    /* Already in utf8 */
   Item *expr;
-  LEX_CSTRING name;                             /* Name of constraint */
+  Lex_ident name;                               /* Name of constraint */
   /* see VCOL_* (VCOL_FIELD_REF, ...) */
   uint flags;
 
@@ -553,7 +553,7 @@ public:
     name.str= NULL;
     name.length= 0;
   };
-  ~Virtual_column_info() {}
+  ~Virtual_column_info() {};
   enum_vcol_info_type get_vcol_type() const
   {
     return vcol_type;
@@ -1083,7 +1083,7 @@ public:
   virtual int cmp(const uchar *,const uchar *)=0;
   virtual int cmp_binary(const uchar *a,const uchar *b, uint32 max_length=~0U)
   { return memcmp(a,b,pack_length()); }
-  virtual int cmp_offset(uint row_offset)
+  virtual int cmp_offset(my_ptrdiff_t row_offset)
   { return cmp(ptr,ptr+row_offset); }
   virtual int cmp_binary_offset(uint row_offset)
   { return cmp_binary(ptr, ptr+row_offset); };
@@ -1576,6 +1576,17 @@ public:
 
   /* Hash value */
   virtual void hash(ulong *nr, ulong *nr2);
+
+  /**
+    Get the upper limit of the MySQL integral and floating-point type.
+
+    @return maximum allowed value for the field
+  */
+  virtual ulonglong get_max_int_value() const
+  {
+    DBUG_ASSERT(false);
+    return 0ULL;
+  }
 
 /**
   Checks whether a string field is part of write_set.
@@ -2232,6 +2243,10 @@ public:
     *to= *from;
     return from + 1;
   }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFULL : 0x7FULL;
+  }
 };
 
 
@@ -2276,6 +2291,10 @@ public:
   virtual const uchar *unpack(uchar* to, const uchar *from,
                               const uchar *from_end, uint param_data)
   { return unpack_int16(to, from, from_end); }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFULL : 0x7FFFULL;
+  }
 };
 
 class Field_medium :public Field_int
@@ -2310,6 +2329,10 @@ public:
   virtual uchar *pack(uchar* to, const uchar *from, uint max_length)
   {
     return Field::pack(to, from, max_length);
+  }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFULL : 0x7FFFFFULL;
   }
 };
 
@@ -2359,6 +2382,10 @@ public:
                               uint param_data __attribute__((unused)))
   {
     return unpack_int32(to, from, from_end);
+  }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFFFULL : 0x7FFFFFFFULL;
   }
 };
 
@@ -2414,6 +2441,10 @@ public:
   }
   void set_max();
   bool is_max();
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFFFFFFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL;
+  }
 };
 
 
@@ -2496,6 +2527,13 @@ public:
   uint32 pack_length() const { return sizeof(float); }
   uint row_pack_length() const { return pack_length(); }
   void sql_type(String &str) const;
+  virtual ulonglong get_max_int_value() const
+  {
+    /*
+      We use the maximum as per IEEE754-2008 standard, 2^24
+    */
+    return 0x1000000ULL;
+  }
 private:
   int save_field_metadata(uchar *first_byte);
 };
@@ -2554,6 +2592,13 @@ public:
   uint32 pack_length() const { return sizeof(double); }
   uint row_pack_length() const { return pack_length(); }
   void sql_type(String &str) const;
+  virtual ulonglong get_max_int_value() const
+  {
+    /*
+      We use the maximum as per IEEE754-2008 standard, 2^53
+    */
+    return 0x20000000000000ULL;
+  }
 private:
   int save_field_metadata(uchar *first_byte);
 };
@@ -4311,7 +4356,7 @@ public:
   int key_cmp(const uchar *a, const uchar *b)
   { return cmp_binary((uchar *) a, (uchar *) b); }
   int key_cmp(const uchar *str, uint length);
-  int cmp_offset(uint row_offset);
+  int cmp_offset(my_ptrdiff_t row_offset);
   bool update_min(Field *min_val, bool force_update)
   { 
     longlong val= val_int();
@@ -4560,15 +4605,17 @@ public:
 
   enum_column_versioning versioning;
 
+  Table_period_info *period;
+
   Column_definition()
    :Type_handler_hybrid_field_type(&type_handler_null),
     compression_method_ptr(0),
     comment(null_clex_str),
-    on_update(NULL), invisible(VISIBLE), decimals(0),
+    on_update(NULL), invisible(VISIBLE), char_length(0), decimals(0),
     flags(0), pack_length(0), key_length(0),
     option_list(NULL),
     vcol_info(0), default_value(0), check_constraint(0),
-    versioning(VERSIONING_NOT_SET)
+    versioning(VERSIONING_NOT_SET), period(NULL)
   {
     interval_list.empty();
   }
@@ -4675,6 +4722,7 @@ public:
   bool fix_attributes_bit();
 
   bool check(THD *thd);
+  bool validate_check_constraint(THD *thd);
 
   bool stored_in_db() const { return !vcol_info || vcol_info->stored_in_db; }
 
@@ -4955,6 +5003,83 @@ class Send_field :public Sql_alloc {
   uint flags, decimals;
   enum_field_types type;
   Send_field() {}
+  Send_field(Field *field)
+  {
+    field->make_send_field(this);
+    DBUG_ASSERT(table_name != 0);
+    normalize();
+  }
+
+  Send_field(Field *field,
+             const char *db_name_arg,
+             const char *table_name_arg)
+   :db_name(db_name_arg),
+    table_name(table_name_arg),
+    org_table_name(table_name_arg),
+    col_name(field->field_name),
+    org_col_name(field->field_name),
+    length(field->field_length),
+    flags(field->table->maybe_null ?
+          (field->flags & ~NOT_NULL_FLAG) : field->flags),
+    decimals(field->decimals()),
+    type(field->type())
+  {
+    normalize();
+  }
+
+  // This should move to Type_handler eventually
+  static enum_field_types protocol_type_code(enum_field_types type)
+  {
+    /* Keep things compatible for old clients */
+    if (type == MYSQL_TYPE_VARCHAR)
+      return MYSQL_TYPE_VAR_STRING;
+    return type;
+  }
+  void normalize()
+  {
+    /* limit number of decimals for float and double */
+    if (type == MYSQL_TYPE_FLOAT || type == MYSQL_TYPE_DOUBLE)
+      set_if_smaller(decimals, FLOATING_POINT_DECIMALS);
+    /* Keep things compatible for old clients */
+    type= protocol_type_code(type);
+  }
+
+  // This should move to Type_handler eventually
+  uint32 max_char_length(CHARSET_INFO *cs) const
+  {
+    return type >= MYSQL_TYPE_TINY_BLOB && type <= MYSQL_TYPE_BLOB ?
+                   length / cs->mbminlen :
+                   length / cs->mbmaxlen;
+  }
+  uint32 max_octet_length(CHARSET_INFO *from, CHARSET_INFO *to) const
+  {
+    /*
+      For TEXT/BLOB columns, field_length describes the maximum data
+      length in bytes. There is no limit to the number of characters
+      that a TEXT column can store, as long as the data fits into
+      the designated space.
+      For the rest of textual columns, field_length is evaluated as
+      char_count * mbmaxlen, where character count is taken from the
+      definition of the column. In other words, the maximum number
+      of characters here is limited by the column definition.
+
+      When one has a LONG TEXT column with a single-byte
+      character set, and the connection character set is multi-byte, the
+      client may get fields longer than UINT_MAX32, due to
+      <character set column> -> <character set connection> conversion.
+      In that case column max length would not fit into the 4 bytes
+      reserved for it in the protocol. So we cut it here to UINT_MAX32.
+    */
+    return char_to_byte_length_safe(max_char_length(from), to->mbmaxlen);
+  }
+
+  // This should move to Type_handler eventually
+  bool is_sane() const
+  {
+    return (decimals <= FLOATING_POINT_DECIMALS ||
+            (type != MYSQL_TYPE_FLOAT && type != MYSQL_TYPE_DOUBLE)) &&
+           type != MYSQL_TYPE_VARCHAR;
+  }
 };
 
 

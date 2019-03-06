@@ -516,7 +516,7 @@ kill_xtrabackup()
 setup_ports()
 {
     if [[ "$WSREP_SST_OPT_ROLE"  == "donor" ]];then
-        if [[ ${WSREP_SST_OPT_ADDR:0:1} == '[' ]];then
+        if [ "${WSREP_SST_OPT_ADDR#\[}" != "$WSREP_SST_OPT_ADDR" ]; then
             remain=$(echo $WSREP_SST_OPT_ADDR | awk -F '\\][:/]' '{ print $2 }')
             REMOTEIP=$(echo $WSREP_SST_OPT_ADDR | awk -F '\\]:' '{ print $1 }')"]"
             SST_PORT=$(echo $remain | awk -F '[:/]' '{ print $1 }')
@@ -529,7 +529,7 @@ setup_ports()
             sst_ver=$(echo $WSREP_SST_OPT_ADDR | awk -F '[:/]' '{ print $5 }')
         fi
     else
-        if [[ ${WSREP_SST_OPT_ADDR:0:1} == '[' ]];then
+        if [ "${WSREP_SST_OPT_ADDR#\[}" != "$WSREP_SST_OPT_ADDR" ]; then
             SST_PORT=$(echo ${WSREP_SST_OPT_ADDR} | awk -F '\\]:' '{ print $2 }')
         else
             SST_PORT=$(echo ${WSREP_SST_OPT_ADDR} | awk -F ':' '{ print $2 }')
@@ -753,8 +753,8 @@ else
 
 if [[ "$sstlogarchive" -eq 1 ]]
 then
-    ARCHIVETIMESTAMP=$(date "+%Y.%m.%d-%H.%M.%S")
-    newfile=""    
+    ARCHIVETIMESTAMP=$(date "+%Y.%m.%d-%H.%M.%S.%N")
+    newfile=""
 
     if [[ ! -z "$sstlogarchivedir" ]]
     then
@@ -972,7 +972,7 @@ then
     if [ -z "${SST_PORT}" ]
     then
         SST_PORT=4444
-        if [[ ${ADDR:0:1} == '[' ]];then
+        if [ "${ADDR#\[}" != "$ADDR" ]; then
             ADDR="$(echo ${WSREP_SST_OPT_ADDR} | awk -F '\\]:' '{ print $1 }')]:${SST_PORT}"
         else
             ADDR="$(echo ${WSREP_SST_OPT_ADDR} | awk -F ':' '{ print $1 }'):${SST_PORT}"

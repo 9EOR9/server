@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2018, MariaDB Corporation.
+   Copyright (c) 2008, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -71,6 +71,7 @@
 #include "wsrep_thd.h"
 #include "wsrep_trans_observer.h"
 #endif /* WITH_WSREP */
+#include "opt_trace.h"
 
 #ifdef HAVE_SYS_SYSCALL_H
 #include <sys/syscall.h>
@@ -641,6 +642,10 @@ THD::THD(my_thread_id id, bool is_wsrep_applier, bool skip_global_sys_var_lock)
    tdc_hash_pins(0),
    xid_hash_pins(0),
    m_tmp_tables_locked(false)
+#ifdef HAVE_REPLICATION
+   ,
+   slave_info(0)
+#endif
 #ifdef WITH_WSREP
    ,
    wsrep_applier(is_wsrep_applier),
@@ -786,11 +791,6 @@ THD::THD(my_thread_id id, bool is_wsrep_applier, bool skip_global_sys_var_lock)
   mysql_mutex_init(key_LOCK_wakeup_ready, &LOCK_wakeup_ready, MY_MUTEX_INIT_FAST);
   mysql_mutex_init(key_LOCK_thd_kill, &LOCK_thd_kill, MY_MUTEX_INIT_FAST);
   mysql_cond_init(key_COND_wakeup_ready, &COND_wakeup_ready, 0);
-  /*
-    LOCK_thread_count goes before LOCK_thd_data - the former is called around
-    'delete thd', the latter - in THD::~THD
-  */
-  mysql_mutex_record_order(&LOCK_thread_count, &LOCK_thd_data);
 
   /* Variables with default values */
   proc_info="login";
@@ -862,9 +862,10 @@ THD::THD(my_thread_id id, bool is_wsrep_applier, bool skip_global_sys_var_lock)
   prepare_derived_at_open= FALSE;
   create_tmp_table_for_derived= FALSE;
   save_prep_leaf_list= FALSE;
+  org_charset= 0;
+  having_pushdown= FALSE;
   /* Restore THR_THD */
   set_current_thd(old_THR_THD);
-  inc_thread_count();
 }
 
 
@@ -1043,7 +1044,8 @@ Sql_condition* THD::raise_condition(uint sql_errno,
     level= Sql_condition::WARN_LEVEL_ERROR;
   }
 
-  if (handle_condition(sql_errno, sqlstate, &level, msg, &cond))
+  if (!is_fatal_error &&
+      handle_condition(sql_errno, sqlstate, &level, msg, &cond))
     DBUG_RETURN(cond);
 
   switch (level) {
@@ -1415,6 +1417,7 @@ void THD::change_user(void)
   sp_cache_clear(&sp_func_cache);
   sp_cache_clear(&sp_package_spec_cache);
   sp_cache_clear(&sp_package_body_cache);
+  opt_trace.delete_traces();
 }
 
 /**
@@ -1563,6 +1566,9 @@ void THD::cleanup(void)
   DBUG_ASSERT(!mdl_context.has_locks());
 
   apc_target.destroy();
+#ifdef HAVE_REPLICATION
+  unregister_slave();
+#endif
   cleanup_done=1;
   DBUG_VOID_RETURN;
 }
@@ -1639,10 +1645,8 @@ THD::~THD()
   THD *orig_thd= current_thd;
   THD_CHECK_SENTRY(this);
   DBUG_ENTER("~THD()");
-  /* Check that we have already called thd->unlink() */
-  DBUG_ASSERT(prev == 0 && next == 0);
-  /* This takes a long time so we should not do this under LOCK_thread_count */
-  mysql_mutex_assert_not_owner(&LOCK_thread_count);
+  /* Make sure threads are not available via server_threads.  */
+  assert_not_linked();
 
   /*
     In error cases, thd may not be current thd. We have to fix this so
@@ -1723,7 +1727,6 @@ THD::~THD()
   }
   update_global_memory_status(status_var.global_memory_used);
   set_current_thd(orig_thd == this ? 0 : orig_thd);
-  dec_thread_count();
   DBUG_VOID_RETURN;
 }
 
@@ -2193,6 +2196,11 @@ void THD::reset_globals()
   /* Undocking the thread specific data. */
   set_current_thd(0);
   net.thd= 0;
+}
+
+bool THD::trace_started()
+{
+  return opt_trace.is_started();
 }
 
 /*
@@ -2731,13 +2739,13 @@ void THD::make_explain_field_list(List<Item> &field_list, uint8 explain_flags,
                                          NAME_CHAR_LEN*MAX_REF_PARTS, cs),
                        mem_root);
   item->maybe_null=1;
-  field_list.push_back(item= new (mem_root)
-                       Item_return_int(this, "rows", 10, MYSQL_TYPE_LONGLONG),
+  field_list.push_back(item=new (mem_root)
+                       Item_empty_string(this, "rows", NAME_CHAR_LEN, cs),
                        mem_root);
   if (is_analyze)
   {
     field_list.push_back(item= new (mem_root)
-                         Item_float(this, "r_rows", 0.1234, 10, 4),
+                         Item_empty_string(this, "r_rows", NAME_CHAR_LEN, cs),
                          mem_root);
     item->maybe_null=1;
   }
@@ -4297,6 +4305,7 @@ void Security_context::init()
   host_or_ip= "connecting host";
   priv_user[0]= priv_host[0]= proxy_user[0]= priv_role[0]= '\0';
   master_access= 0;
+  password_expired= false;
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
   db_access= NO_ACCESS;
 #endif
@@ -4335,6 +4344,7 @@ void Security_context::skip_grants()
   host_or_ip= (char *)"";
   master_access= ~NO_ACCESS;
   *priv_user= *priv_host= '\0';
+  password_expired= false;
 }
 
 
@@ -4343,6 +4353,13 @@ bool Security_context::set_user(char *user_arg)
   my_free((char*) user);
   user= my_strdup(user_arg, MYF(0));
   return user == 0;
+}
+
+bool Security_context::check_access(ulong want_access, bool match_any)
+{
+  DBUG_ENTER("Security_context::check_access");
+  DBUG_RETURN((match_any ? (master_access & want_access)
+                         : ((master_access & want_access) == want_access)));
 }
 
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
@@ -4444,6 +4461,13 @@ bool Security_context::user_matches(Security_context *them)
 {
   return ((user != NULL) && (them->user != NULL) &&
           !strcmp(user, them->user));
+}
+
+bool Security_context::is_priv_user(const char *user, const char *host)
+{
+  return ((user != NULL) && (host != NULL) &&
+          !strcmp(user, priv_user) &&
+          !my_strcasecmp(system_charset_info, host,priv_host));
 }
 
 
@@ -4772,14 +4796,14 @@ MYSQL_THD create_thd()
   thd->set_command(COM_DAEMON);
   thd->system_thread= SYSTEM_THREAD_GENERIC;
   thd->security_ctx->host_or_ip="";
-  add_to_active_threads(thd);
+  server_threads.insert(thd);
   return thd;
 }
 
 void destroy_thd(MYSQL_THD thd)
 {
   thd->add_status_to_global();
-  unlink_not_visible_thd(thd);
+  server_threads.erase(thd);
   delete thd;
 }
 
@@ -5586,7 +5610,7 @@ void THD::get_definer(LEX_USER *definer, bool role)
   {
     definer->user= invoker.user;
     definer->host= invoker.host;
-    definer->reset_auth();
+    definer->auth= NULL;
   }
   else
 #endif
@@ -5981,7 +6005,8 @@ int THD::decide_logging_format(TABLE_LIST *tables)
     binlog by filtering rules.
   */
 #ifdef WITH_WSREP
-  if (WSREP_CLIENT_NNULL(this) && variables.wsrep_trx_fragment_size > 0)
+  if (WSREP_CLIENT_NNULL(this) && wsrep_thd_is_local(this) &&
+      variables.wsrep_trx_fragment_size > 0)
   {
     if (!is_current_stmt_binlog_format_row())
     {
@@ -6718,6 +6743,22 @@ int THD::binlog_update_row(TABLE* table, bool is_trans,
   DBUG_ASSERT(is_current_stmt_binlog_format_row() &&
             ((WSREP(this) && wsrep_emulate_bin_log) || mysql_bin_log.is_open()));
 
+  /**
+    Save a reference to the original read bitmaps
+    We will need this to restore the bitmaps at the end as
+    binlog_prepare_row_images() may change table->read_set.
+    table->read_set is used by pack_row and deep in
+    binlog_prepare_pending_events().
+  */
+  MY_BITMAP *old_read_set= table->read_set;
+
+  /**
+     This will remove spurious fields required during execution but
+     not needed for binlogging. This is done according to the:
+     binlog-row-image option.
+   */
+  binlog_prepare_row_images(table);
+
   size_t const before_maxlen= max_row_length(table, table->read_set,
                                              before_record);
   size_t const after_maxlen=  max_row_length(table, table->rpl_write_set,
@@ -6731,9 +6772,9 @@ int THD::binlog_update_row(TABLE* table, bool is_trans,
   uchar *after_row= row_data.slot(1);
 
   size_t const before_size= pack_row(table, table->read_set, before_row,
-                                        before_record);
+                                     before_record);
   size_t const after_size= pack_row(table, table->rpl_write_set, after_row,
-                                       after_record);
+                                    after_record);
 
   /* Ensure that all events in a GTID group are in the same cache */
   if (variables.option_bits & OPTION_GTID_BEGIN)
@@ -6768,6 +6809,9 @@ int THD::binlog_update_row(TABLE* table, bool is_trans,
   int error=  ev->add_row_data(before_row, before_size) ||
               ev->add_row_data(after_row, after_size);
 
+  /* restore read set for the rest of execution */
+  table->column_bitmaps_set_no_signal(old_read_set,
+                                      table->write_set);
   return error;
 
 }

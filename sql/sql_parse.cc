@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2018, MariaDB
+   Copyright (c) 2008, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -100,6 +100,7 @@
 #include "set_var.h"
 #include "sql_bootstrap.h"
 #include "sql_sequence.h"
+#include "opt_trace.h"
 
 #include "my_json_writer.h" 
 
@@ -979,15 +980,29 @@ static char *fgets_fn(char *buffer, size_t size, fgets_input_t input, int *error
 }
 
 
-static void handle_bootstrap_impl(THD *thd)
+int bootstrap(MYSQL_FILE *file)
 {
-  MYSQL_FILE *file= bootstrap_file;
-  DBUG_ENTER("handle_bootstrap_impl");
+  int bootstrap_error= 0;
+  DBUG_ENTER("handle_bootstrap");
+
+  THD *thd= new THD(next_thread_id());
+#ifdef WITH_WSREP
+  thd->variables.wsrep_on= 0;
+#endif
+  thd->bootstrap=1;
+  my_net_init(&thd->net,(st_vio*) 0, thd, MYF(0));
+  thd->max_client_packet_length= thd->net.max_packet;
+  thd->security_ctx->master_access= ~(ulong)0;
 
 #ifndef EMBEDDED_LIBRARY
-  pthread_detach_this_thread();
+  mysql_thread_set_psi_id(thd->thread_id);
+#else
+  thd->mysql= 0;
+#endif
+
+  /* The following must be called before DBUG_ENTER */
   thd->thread_stack= (char*) &thd;
-#endif /* EMBEDDED_LIBRARY */
+  thd->store_globals();
 
   thd->security_ctx->user= (char*) my_strdup("boot", MYF(MY_WME));
   thd->security_ctx->priv_user[0]= thd->security_ctx->priv_host[0]=
@@ -1064,10 +1079,6 @@ static void handle_bootstrap_impl(THD *thd)
     thd->profiling.set_query_source(thd->query(), length);
 #endif
 
-    /*
-      We don't need to obtain LOCK_thread_count here because in bootstrap
-      mode we have only one thread.
-    */
     thd->set_time();
     Parser_state parser_state;
     if (parser_state.init(thd, thd->query(), length))
@@ -1095,56 +1106,8 @@ static void handle_bootstrap_impl(THD *thd)
     free_root(&thd->transaction.mem_root,MYF(MY_KEEP_PREALLOC));
     thd->lex->restore_set_statement_var();
   }
-
-  DBUG_VOID_RETURN;
-}
-
-
-/**
-  Execute commands from bootstrap_file.
-
-  Used when creating the initial grant tables.
-*/
-
-pthread_handler_t handle_bootstrap(void *arg)
-{
-  THD *thd=(THD*) arg;
-
-  mysql_thread_set_psi_id(thd->thread_id);
-
-  do_handle_bootstrap(thd);
-  return 0;
-}
-
-void do_handle_bootstrap(THD *thd)
-{
-  /* The following must be called before DBUG_ENTER */
-  thd->thread_stack= (char*) &thd;
-  if (my_thread_init() || thd->store_globals())
-  {
-#ifndef EMBEDDED_LIBRARY
-    close_connection(thd, ER_OUT_OF_RESOURCES);
-#endif
-    thd->fatal_error();
-    goto end;
-  }
-
-  handle_bootstrap_impl(thd);
-
-end:
   delete thd;
-
-  mysql_mutex_lock(&LOCK_thread_count);
-  in_bootstrap = FALSE;
-  mysql_cond_broadcast(&COND_thread_count);
-  mysql_mutex_unlock(&LOCK_thread_count);
-
-#ifndef EMBEDDED_LIBRARY
-  my_thread_end();
-  pthread_exit(0);
-#endif
-
-  return;
+  DBUG_RETURN(bootstrap_error);
 }
 
 
@@ -1612,7 +1575,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     thd->variables.log_slow_disabled_statements defines which statements
     are logged to slow log
   */
-  thd->enable_slow_log= thd->variables.sql_log_slow;
+  thd->enable_slow_log= true;
   thd->query_plan_flags= QPLAN_INIT;
   thd->lex->sql_command= SQLCOM_END; /* to avoid confusing VIEW detectors */
   thd->reset_kill_query();
@@ -1663,6 +1626,15 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       thd->get_stmt_da()->set_skip_flush();
   }
 
+  if (unlikely(thd->security_ctx->password_expired &&
+               command != COM_QUERY &&
+               command != COM_PING &&
+               command != COM_QUIT))
+  {
+    my_error(ER_MUST_CHANGE_PASSWORD, MYF(0));
+    goto dispatch_end;
+  }
+
   switch (command) {
   case COM_INIT_DB:
   {
@@ -1682,7 +1654,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   case COM_REGISTER_SLAVE:
   {
     status_var_increment(thd->status_var.com_register_slave);
-    if (!register_slave(thd, (uchar*)packet, packet_length))
+    if (!thd->register_slave((uchar*) packet, packet_length))
       my_ok(thd);
     break;
   }
@@ -1692,6 +1664,9 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     thd->status_var.com_other++;
     thd->change_user();
     thd->clear_error();                         // if errors from rollback
+    /* Restore original charset from client authentication packet.*/
+    if(thd->org_charset)
+      thd->update_charset(thd->org_charset,thd->org_charset,thd->org_charset);
     my_ok(thd, 0, 0, 0);
     break;
   }
@@ -1763,11 +1738,23 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   case COM_STMT_BULK_EXECUTE:
   {
     mysqld_stmt_bulk_execute(thd, packet, packet_length);
+#ifdef WITH_WSREP
+    if (WSREP_ON)
+    {
+        (void)wsrep_after_statement(thd);
+    }
+#endif /* WITH_WSREP */
     break;
   }
   case COM_STMT_EXECUTE:
   {
     mysqld_stmt_execute(thd, packet, packet_length);
+#ifdef WITH_WSREP
+    if (WSREP_ON)
+    {
+        (void)wsrep_after_statement(thd);
+    }
+#endif /* WITH_WSREP */
     break;
   }
   case COM_STMT_FETCH:
@@ -2107,7 +2094,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       general_log_print(thd, command, "Log: '%s'  Pos: %lu", name, pos);
       if (nlen < FN_REFLEN)
         mysql_binlog_send(thd, thd->strmake(name, nlen), (my_off_t)pos, flags);
-      unregister_slave(thd,1,1);
+      thd->unregister_slave();
       /*  fake COM_QUIT -- if we get here, the thread needs to terminate */
       error = TRUE;
       break;
@@ -2379,8 +2366,8 @@ com_multi_end:
     break;
   }
 
+dispatch_end:
 #ifdef WITH_WSREP
- dispatch_end:
   /*
     BF aborted before sending response back to client
   */
@@ -2491,6 +2478,32 @@ com_multi_end:
 }
 
 
+static bool log_slow_enabled_statement(const THD *thd)
+{
+  /*
+    TODO-10.4: Add classes Sql_cmd_create_index and Sql_cmd_drop_index
+    for symmetry with other admin commands, so these statements can be
+    handled by this command:
+  */
+  if (thd->lex->m_sql_cmd)
+    return thd->lex->m_sql_cmd->log_slow_enabled_statement(thd);
+
+  /*
+    Currently CREATE INDEX or DROP INDEX cause a full table rebuild
+    and thus classify as slow administrative statements just like
+    ALTER TABLE.
+  */
+  if ((thd->lex->sql_command == SQLCOM_CREATE_INDEX ||
+       thd->lex->sql_command == SQLCOM_DROP_INDEX) &&
+      MY_TEST(thd->variables.log_slow_disabled_statements &
+              LOG_SLOW_DISABLE_ADMIN))
+    return true;
+
+  return global_system_variables.sql_log_slow &&
+         thd->variables.sql_log_slow;
+}
+
+
 /*
   Log query to slow queries, if it passes filtering
 
@@ -2509,8 +2522,17 @@ void log_slow_statement(THD *thd)
   */
   if (unlikely(thd->in_sub_stmt))
     goto end;                           // Don't set time for sub stmt
-  if (!thd->enable_slow_log || !global_system_variables.sql_log_slow)
-    goto end;
+  /*
+    Skip both long_query_count increment and logging if the current
+    statement forces slow log suppression (e.g. an SP statement).
+
+    Note, we don't check for global_system_variables.sql_log_slow here.
+    According to the manual, the "Slow_queries" status variable does not require
+    sql_log_slow to be ON. So even if sql_log_slow is OFF, we still need to
+    continue and increment long_query_count (and skip only logging, see below):
+  */
+  if (!thd->enable_slow_log)
+    goto end; // E.g. SP statement
 
   if ((thd->server_status &
        (SERVER_QUERY_NO_INDEX_USED | SERVER_QUERY_NO_GOOD_INDEX_USED)) &&
@@ -2523,21 +2545,28 @@ void log_slow_statement(THD *thd)
     thd->server_status|= SERVER_QUERY_WAS_SLOW;
   }
 
-  /* Follow the slow log filter configuration. */ 
-  if (thd->variables.log_slow_filter &&
-      !(thd->variables.log_slow_filter & thd->query_plan_flags))
-    goto end; 
-
   if ((thd->server_status & SERVER_QUERY_WAS_SLOW) &&
       thd->get_examined_row_count() >= thd->variables.min_examined_row_limit)
   {
     thd->status_var.long_query_count++;
+
+    if (!log_slow_enabled_statement(thd))
+      goto end;
+
     /*
       If rate limiting of slow log writes is enabled, decide whether to log
       this query to the log or not.
     */ 
     if (thd->variables.log_slow_rate_limit > 1 &&
         (global_query_id % thd->variables.log_slow_rate_limit) != 0)
+      goto end;
+
+    /*
+      Follow the slow log filter configuration:
+      skip logging if the current statement matches the filter.
+    */
+    if (thd->variables.log_slow_filter &&
+        !(thd->variables.log_slow_filter & thd->query_plan_flags))
       goto end;
 
     THD_STAGE_INFO(thd, stage_logging_slow_query);
@@ -3274,6 +3303,13 @@ mysql_execute_command(THD *thd)
 #endif
   DBUG_ENTER("mysql_execute_command");
 
+  if (thd->security_ctx->password_expired &&
+      lex->sql_command != SQLCOM_SET_OPTION)
+  {
+    my_error(ER_MUST_CHANGE_PASSWORD, MYF(0));
+    DBUG_RETURN(1);
+  }
+
   DBUG_ASSERT(thd->transaction.stmt.is_empty() || thd->in_sub_stmt);
   /*
     Each statement or replication event which might produce deadlock
@@ -3447,6 +3483,13 @@ mysql_execute_command(THD *thd)
 #ifdef HAVE_REPLICATION
   } /* endif unlikely slave */
 #endif
+  Opt_trace_start ots(thd, all_tables, lex->sql_command, &lex->var_list,
+                      thd->query(), thd->query_length(),
+                      thd->variables.character_set_client);
+
+  Json_writer_object trace_command(thd);
+  Json_writer_array trace_command_steps(thd, "steps");
+
 #ifdef WITH_WSREP
   if (WSREP(thd))
   {
@@ -4326,8 +4369,8 @@ mysql_execute_command(THD *thd)
       }
       else
       {
-        if (create_info.vers_fix_system_fields(thd, &alter_info, *create_table) ||
-            create_info.vers_check_system_fields(thd, &alter_info, *create_table))
+        if (create_info.fix_create_fields(thd, &alter_info, *create_table) ||
+            create_info.check_fields(thd, &alter_info, *create_table))
           goto end_with_restore_list;
 
         /*
@@ -8990,24 +9033,35 @@ void add_join_natural(TABLE_LIST *a, TABLE_LIST *b, List<String> *using_fields,
           pointer - thread found, and its LOCK_thd_kill is locked.
 */
 
+struct find_thread_callback_arg
+{
+  find_thread_callback_arg(longlong id_arg, bool query_id_arg):
+    thd(0), id(id_arg), query_id(query_id_arg) {}
+  THD *thd;
+  longlong id;
+  bool query_id;
+};
+
+
+my_bool find_thread_callback(THD *thd, find_thread_callback_arg *arg)
+{
+  if (thd->get_command() != COM_DAEMON &&
+      arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
+  {
+    if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
+    mysql_mutex_lock(&thd->LOCK_thd_kill);    // Lock from delete
+    arg->thd= thd;
+    return 1;
+  }
+  return 0;
+}
+
+
 THD *find_thread_by_id(longlong id, bool query_id)
 {
-  THD *tmp;
-  mysql_mutex_lock(&LOCK_thread_count); // For unlink from list
-  I_List_iterator<THD> it(threads);
-  while ((tmp=it++))
-  {
-    if (tmp->get_command() == COM_DAEMON)
-      continue;
-    if (id == (query_id ? tmp->query_id : (longlong) tmp->thread_id))
-    {
-      if (WSREP(tmp)) mysql_mutex_lock(&tmp->LOCK_thd_data);
-      mysql_mutex_lock(&tmp->LOCK_thd_kill);    // Lock from delete
-      break;
-    }
-  }
-  mysql_mutex_unlock(&LOCK_thread_count);
-  return tmp;
+  find_thread_callback_arg arg(id, query_id);
+  server_threads.iterate(find_thread_callback, &arg);
+  return arg.thd;
 }
 
 
@@ -9018,9 +9072,6 @@ THD *find_thread_by_id(longlong id, bool query_id)
   @param id                     Thread id or query id
   @param kill_signal            Should it kill the query or the connection
   @param type                   Type of id: thread id or query id
-
-  @note
-    This is written such that we have a short lock on LOCK_thread_count
 */
 
 uint
@@ -9085,17 +9136,51 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
   @param only_kill_query        Should it kill the query or the connection
 
   @note
-    This is written such that we have a short lock on LOCK_thread_count
-
     If we can't kill all threads because of security issues, no threads
     are killed.
 */
 
+struct kill_threads_callback_arg
+{
+  kill_threads_callback_arg(THD *thd_arg, LEX_USER *user_arg):
+    thd(thd_arg), user(user_arg) {}
+  THD *thd;
+  LEX_USER *user;
+  List<THD> threads_to_kill;
+};
+
+
+static my_bool kill_threads_callback(THD *thd, kill_threads_callback_arg *arg)
+{
+  if (thd->security_ctx->user)
+  {
+    /*
+      Check that hostname (if given) and user name matches.
+
+      host.str[0] == '%' means that host name was not given. See sql_yacc.yy
+    */
+    if (((arg->user->host.str[0] == '%' && !arg->user->host.str[1]) ||
+         !strcmp(thd->security_ctx->host_or_ip, arg->user->host.str)) &&
+        !strcmp(thd->security_ctx->user, arg->user->user.str))
+    {
+      if (!(arg->thd->security_ctx->master_access & SUPER_ACL) &&
+          !arg->thd->security_ctx->user_matches(thd->security_ctx))
+        return 1;
+      if (!arg->threads_to_kill.push_back(thd, arg->thd->mem_root))
+      {
+        if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
+        mysql_mutex_lock(&thd->LOCK_thd_kill); // Lock from delete
+      }
+    }
+  }
+  return 0;
+}
+
+
 static uint kill_threads_for_user(THD *thd, LEX_USER *user,
                                   killed_state kill_signal, ha_rows *rows)
 {
-  THD *tmp;
-  List<THD> threads_to_kill;
+  kill_threads_callback_arg arg(thd, user);
   DBUG_ENTER("kill_threads_for_user");
 
   *rows= 0;
@@ -9106,38 +9191,12 @@ static uint kill_threads_for_user(THD *thd, LEX_USER *user,
   DBUG_PRINT("enter", ("user: %s  signal: %u", user->user.str,
                        (uint) kill_signal));
 
-  mysql_mutex_lock(&LOCK_thread_count); // For unlink from list
-  I_List_iterator<THD> it(threads);
-  while ((tmp=it++))
-  {
-    if (!tmp->security_ctx->user)
-      continue;
-    /*
-      Check that hostname (if given) and user name matches.
+  if (server_threads.iterate(kill_threads_callback, &arg))
+    DBUG_RETURN(ER_KILL_DENIED_ERROR);
 
-      host.str[0] == '%' means that host name was not given. See sql_yacc.yy
-    */
-    if (((user->host.str[0] == '%' && !user->host.str[1]) ||
-         !strcmp(tmp->security_ctx->host_or_ip, user->host.str)) &&
-        !strcmp(tmp->security_ctx->user, user->user.str))
-    {
-      if (!(thd->security_ctx->master_access & SUPER_ACL) &&
-          !thd->security_ctx->user_matches(tmp->security_ctx))
-      {
-        mysql_mutex_unlock(&LOCK_thread_count);
-        DBUG_RETURN(ER_KILL_DENIED_ERROR);
-      }
-      if (!threads_to_kill.push_back(tmp, thd->mem_root))
-      {
-        if (WSREP(tmp)) mysql_mutex_lock(&tmp->LOCK_thd_data);
-        mysql_mutex_lock(&tmp->LOCK_thd_kill); // Lock from delete
-      }
-    }
-  }
-  mysql_mutex_unlock(&LOCK_thread_count);
-  if (!threads_to_kill.is_empty())
+  if (!arg.threads_to_kill.is_empty())
   {
-    List_iterator_fast<THD> it2(threads_to_kill);
+    List_iterator_fast<THD> it2(arg.threads_to_kill);
     THD *next_ptr;
     THD *ptr= it2++;
     do
@@ -9852,8 +9911,7 @@ void get_default_definer(THD *thd, LEX_USER *definer, bool role)
     definer->host.length= strlen(definer->host.str);
   }
   definer->user.length= strlen(definer->user.str);
-
-  definer->reset_auth();
+  definer->auth= NULL;
 }
 
 
@@ -9912,7 +9970,7 @@ LEX_USER *create_definer(THD *thd, LEX_CSTRING *user_name,
 
   definer->user= *user_name;
   definer->host= *host_name;
-  definer->reset_auth();
+  definer->auth= NULL;
 
   return definer;
 }

@@ -5176,7 +5176,7 @@ lock_rec_block_validate(
 
 		block = buf_page_get_gen(
 			page_id_t(space_id, page_no),
-			page_size_t(space->flags),
+			space->zip_size(),
 			RW_X_LATCH, NULL,
 			BUF_GET_POSSIBLY_FREED,
 			__FILE__, __LINE__, &mtr, &err);
@@ -7084,6 +7084,12 @@ DeadlockChecker::check_and_resolve(const lock_t* lock, trx_t* trx)
 	if (victim_trx != NULL) {
 
 		print("*** WE ROLL BACK TRANSACTION (2)\n");
+#ifdef WITH_WSREP
+		if (wsrep_on(trx->mysql_thd)) {
+			wsrep_handle_SR_rollback(trx->mysql_thd,
+						 victim_trx->mysql_thd);
+		}
+#endif
 
 		lock_deadlock_found = true;
 	}

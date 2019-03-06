@@ -234,8 +234,6 @@ long innobase_write_io_threads = 4;
 longlong innobase_page_size = (1LL << 14); /* 16KB */
 char*	innobase_buffer_pool_filename = NULL;
 
-longlong innobase_buffer_pool_size = 8*1024*1024L;
-
 /* The default values for the following char* start-up parameters
 are determined in innobase_init below: */
 
@@ -644,7 +642,6 @@ static void backup_file_op_fail(ulint space_id, const byte* flags,
 	const byte* name, ulint len,
 	const byte* new_name, ulint new_len)
 {
-	ut_a(opt_no_lock);
 	bool fail;
 	if (flags) {
 		msg("DDL tracking :  create %zu \"%.*s\": %x",
@@ -665,6 +662,7 @@ static void backup_file_op_fail(ulint space_id, const byte* flags,
 		msg("DDL tracking : delete %zu \"%.*s\"", space_id, int(len), name);
 	}
 	if (fail) {
+		ut_a(opt_no_lock);
 		die("DDL operation detected in the late phase of backup."
 			"Backup is inconsistent. Remove --no-lock option to fix.");
 	}
@@ -685,9 +683,9 @@ static void backup_optimized_ddl_op(ulint space_id)
   run with --no-lock. Usually aborts the backup.
 */
 static void backup_optimized_ddl_op_fail(ulint space_id) {
-	ut_a(opt_no_lock);
 	msg("DDL tracking : optimized DDL on space %zu", space_id);
 	if (ddl_tracker.tables_in_backup.find(space_id) != ddl_tracker.tables_in_backup.end()) {
+		ut_a(opt_no_lock);
 		msg("ERROR : Optimized DDL operation detected in the late phase of backup."
 			"Backup is inconsistent. Remove --no-lock option to fix.");
 		exit(EXIT_FAILURE);
@@ -800,7 +798,6 @@ enum options_xtrabackup
   OPT_INNODB_LOG_CHECKSUMS,
   OPT_XTRA_INCREMENTAL_FORCE_SCAN,
   OPT_DEFAULTS_GROUP,
-  OPT_INNODB_ENCRYPT_LOG,
   OPT_CLOSE_FILES,
   OPT_CORE_FILE,
 
@@ -1257,11 +1254,6 @@ struct my_option xb_server_options[] =
    (G_PTR*) &sys_tablespace_auto_extend_increment,
    (G_PTR*) &sys_tablespace_auto_extend_increment,
    0, GET_ULONG, REQUIRED_ARG, 8L, 1L, 1000L, 0, 1L, 0},
-  {"innodb_buffer_pool_size", OPT_INNODB_BUFFER_POOL_SIZE,
-   "The size of the memory buffer InnoDB uses to cache data and indexes of its tables.",
-   (G_PTR*) &innobase_buffer_pool_size, (G_PTR*) &innobase_buffer_pool_size, 0,
-   GET_LL, REQUIRED_ARG, 8*1024*1024L, 1024*1024L, LONGLONG_MAX, 0,
-   1024*1024L, 0},
   {"innodb_data_file_path", OPT_INNODB_DATA_FILE_PATH,
    "Path to individual files and their sizes.", &innobase_data_file_path,
    &innobase_data_file_path, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
@@ -1374,10 +1366,6 @@ struct my_option xb_server_options[] =
   "Has no effect in the 'backup' phase (plugin directory during backup is the same as server's)",
   &xb_plugin_dir, &xb_plugin_dir,
   0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0 },
-
-  { "innodb-encrypt-log", OPT_INNODB_ENCRYPT_LOG, "Whether to encrypt innodb log",
-  &srv_encrypt_log, &srv_encrypt_log,
-  0, GET_BOOL, REQUIRED_ARG, 0, 0, 0, 0, 0, 0 },
 
   {"innodb-log-checksums", OPT_INNODB_LOG_CHECKSUMS,
    "Whether to require checksums for InnoDB redo log blocks",
@@ -1575,15 +1563,27 @@ end:
 }
 
 
-static const char *xb_client_default_groups[]=
-	{ "xtrabackup", "mariabackup", "client", 0, 0, 0 };
+static const char *xb_client_default_groups[]={
+   "xtrabackup", "mariabackup",
+   "client", "client-server",
+   "client-mariadb",
+   0, 0, 0
+};
 
-static const char *xb_server_default_groups[]=
-	{ "xtrabackup", "mariabackup", "mysqld", 0, 0, 0 };
+static const char *xb_server_default_groups[]={
+   "xtrabackup", "mariabackup",
+   "mysqld", "server", MYSQL_BASE_VERSION,
+   "mariadb", MARIADB_BASE_VERSION,
+   "client-server",
+   #ifdef WITH_WSREP
+   "galera",
+   #endif
+   0, 0, 0
+};
 
 static void print_version(void)
 {
-  msg("%s based on MariaDB server %s %s (%s)",
+  fprintf(stderr, "%s based on MariaDB server %s %s (%s)\n",
       my_progname, MYSQL_SERVER_VERSION, SYSTEM_TYPE, MACHINE_TYPE);
 }
 
@@ -1689,7 +1689,7 @@ xb_get_one_option(int optid,
 
   case OPT_INNODB_CHECKSUM_ALGORITHM:
 
-    ut_a(srv_checksum_algorithm <= SRV_CHECKSUM_ALGORITHM_STRICT_NONE);
+    ut_a(srv_checksum_algorithm <= SRV_CHECKSUM_ALGORITHM_STRICT_FULL_CRC32);
 
     ADD_PRINT_PARAM_OPT(innodb_checksum_algorithm_names[srv_checksum_algorithm]);
     break;
@@ -1821,13 +1821,6 @@ static bool innodb_init_param()
 			msg("mariabackup: use-memory can't be over 4GB"
 			    " on 32-bit systems");
 		}
-
-		if (innobase_buffer_pool_size > UINT_MAX32) {
-			msg("mariabackup: innobase_buffer_pool_size can't be "
-			    "over 4GB on 32-bit systems");
-
-			goto error;
-		}
 	}
 
 	static char default_path[2] = { FN_CURLIB, 0 };
@@ -1861,15 +1854,18 @@ static bool innodb_init_param()
 	msg("innodb_data_file_path = %s",
 	    innobase_data_file_path);
 
-	/* This is the first time univ_page_size is used.
-	It was initialized to 16k pages before srv_page_size was set */
-	univ_page_size.copy_from(
-		page_size_t(srv_page_size, srv_page_size, false));
-
 	srv_sys_space.set_space_id(TRX_SYS_SPACE);
 	srv_sys_space.set_name("innodb_system");
 	srv_sys_space.set_path(srv_data_home);
-	srv_sys_space.set_flags(FSP_FLAGS_PAGE_SSIZE());
+	switch (srv_checksum_algorithm) {
+	case SRV_CHECKSUM_ALGORITHM_FULL_CRC32:
+	case SRV_CHECKSUM_ALGORITHM_STRICT_FULL_CRC32:
+		srv_sys_space.set_flags(FSP_FLAGS_FCRC32_MASK_MARKER
+					| FSP_FLAGS_FCRC32_PAGE_SSIZE());
+		break;
+	default:
+		srv_sys_space.set_flags(FSP_FLAGS_PAGE_SSIZE());
+	}
 
 	if (!srv_sys_space.parse_params(innobase_data_file_path, true)) {
 		goto error;
@@ -2173,8 +2169,7 @@ xb_read_delta_metadata(const char *filepath, xb_delta_info_t *info)
 		msg("page_size is required in %s", filepath);
 		r = FALSE;
 	} else {
-		info->page_size = page_size_t(zip_size ? zip_size : page_size,
-					      page_size, zip_size != 0);
+		info->page_size = zip_size ? zip_size : page_size;
 	}
 
 	if (info->space_id == ULINT_UNDEFINED) {
@@ -2202,9 +2197,8 @@ xb_write_delta_metadata(const char *filename, const xb_delta_info_t *info)
 		 "page_size = " ULINTPF "\n"
 		 "zip_size = " ULINTPF " \n"
 		 "space_id = " ULINTPF "\n",
-		 info->page_size.logical(),
-		 info->page_size.is_compressed()
-		 ? info->page_size.physical() : 0,
+		 info->page_size,
+		 info->zip_size,
 		 info->space_id);
 	len = strlen(buf);
 
@@ -2762,7 +2756,10 @@ static bool xtrabackup_copy_logfile(bool last = false)
 		log_mutex_exit();
 
 		if (!start_lsn) {
-			die("xtrabackup_copy_logfile() failed.");
+			msg(recv_sys->found_corrupt_log
+			    ? "xtrabackup_copy_logfile() failed: corrupt log."
+			    : "xtrabackup_copy_logfile() failed.");
+			return true;
 		}
 	} while (start_lsn == end_lsn);
 
@@ -3090,7 +3087,16 @@ xb_load_single_table_tablespace(
 		die("Can't open datafile %s", name);
 	}
 
-	err = file->validate_first_page(&flush_lsn);
+	for (int i = 0; i < 10; i++) {
+		err = file->validate_first_page(&flush_lsn);
+		if (err != DB_CORRUPTION) {
+			break;
+		}
+
+		my_sleep(1000);
+	}
+
+	bool is_empty_file = file->exists() && file->is_empty_file();
 
 	if (err == DB_SUCCESS && file->space_id() != SRV_TMP_SPACE_ID) {
 		os_offset_t	node_size = os_file_get_size(file->handle());
@@ -3098,7 +3104,7 @@ xb_load_single_table_tablespace(
 
 		ut_a(node_size != (os_offset_t) -1);
 
-		n_pages = node_size / page_size_t(file->flags()).physical();
+		n_pages = node_size / fil_space_t::physical_size(file->flags());
 
 		space = fil_space_create(
 			name, file->space_id(), file->flags(),
@@ -3122,9 +3128,7 @@ xb_load_single_table_tablespace(
 
 	delete file;
 
-	if (err != DB_SUCCESS && err != DB_CORRUPTION && xtrabackup_backup) {
-		/* allow corrupted first page for xtrabackup, it could be just
-		zero-filled page, which we restore from redo log later */
+	if (err != DB_SUCCESS && xtrabackup_backup && !is_empty_file) {
 		die("Failed to not validate first page of the file %s, error %d",name, (int)err);
 	}
 }
@@ -3278,7 +3282,8 @@ static dberr_t xb_assign_undo_space_start()
 	bool		ret;
 	dberr_t		error = DB_SUCCESS;
 	ulint		space, page_no __attribute__((unused));
-	int n_retries = 5;
+	int		n_retries = 5;
+	ulint		fsp_flags;
 
 	if (srv_undo_tablespaces == 0) {
 		return error;
@@ -3295,6 +3300,15 @@ static dberr_t xb_assign_undo_space_start()
 	buf = static_cast<byte*>(ut_malloc_nokey(2U << srv_page_size_shift));
 	page = static_cast<byte*>(ut_align(buf, srv_page_size));
 
+	if (!os_file_read(IORequestRead, file, page,
+			  0, srv_page_size)) {
+		msg("Reading first page failed.\n");
+		error = DB_ERROR;
+		goto func_exit;
+	}
+
+	fsp_flags = mach_read_from_4(
+			page + FSP_HEADER_OFFSET + FSP_SPACE_FLAGS);
 retry:
 	if (!os_file_read(IORequestRead, file, page,
 			  TRX_SYS_PAGE_NO << srv_page_size_shift,
@@ -3305,7 +3319,7 @@ retry:
 	}
 
 	/* TRX_SYS page can't be compressed or encrypted. */
-	if (buf_page_is_corrupted(false, page, univ_page_size)) {
+	if (buf_page_is_corrupted(false, page, fsp_flags)) {
 		if (n_retries--) {
 			os_thread_sleep(1000);
 			goto retry;
@@ -4583,16 +4597,17 @@ xb_space_create_file(
 	fsp_header_init_fields(page, space_id, flags);
 	mach_write_to_4(page + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, space_id);
 
-	const page_size_t page_size(flags);
+	const ulint zip_size = fil_space_t::zip_size(flags);
 
-	if (!page_size.is_compressed()) {
-		buf_flush_init_for_writing(NULL, page, NULL, 0);
+	if (!zip_size) {
+		buf_flush_init_for_writing(
+			NULL, page, NULL, 0,
+			fil_space_t::full_crc32(flags));
 
 		ret = os_file_write(IORequestWrite, path, *file, page, 0,
 				    srv_page_size);
 	} else {
 		page_zip_des_t	page_zip;
-		ulint zip_size = page_size.physical();
 		page_zip_set_size(&page_zip, zip_size);
 		page_zip.data = page + srv_page_size;
 		fprintf(stderr, "zip_size = " ULINTPF "\n", zip_size);
@@ -4603,7 +4618,7 @@ xb_space_create_file(
 			page_zip.m_end = page_zip.m_nonempty =
 			page_zip.n_blobs = 0;
 
-		buf_flush_init_for_writing(NULL, page, &page_zip, 0);
+		buf_flush_init_for_writing(NULL, page, &page_zip, 0, false);
 
 		ret = os_file_write(IORequestWrite, path, *file,
 				    page_zip.data, 0, zip_size);
@@ -4769,19 +4784,20 @@ exit:
 	}
 
 	/* No matching space found. create the new one.  */
-	const ulint flags = info.page_size.is_compressed()
-		? get_bit_shift(info.page_size.physical()
+	const ulint flags = info.zip_size
+		? get_bit_shift(info.page_size
 				>> (UNIV_ZIP_SIZE_SHIFT_MIN - 1))
 		<< FSP_FLAGS_POS_ZIP_SSIZE
 		| FSP_FLAGS_MASK_POST_ANTELOPE
 		| FSP_FLAGS_MASK_ATOMIC_BLOBS
-		| (info.page_size.logical() == UNIV_PAGE_SIZE_ORIG
+		| (srv_page_size == UNIV_PAGE_SIZE_ORIG
 		   ? 0
-		   : get_bit_shift(info.page_size.logical()
+		   : get_bit_shift(srv_page_size
 				   >> (UNIV_ZIP_SIZE_SHIFT_MIN - 1))
 		   << FSP_FLAGS_POS_PAGE_SSIZE)
 		: FSP_FLAGS_PAGE_SSIZE();
-	ut_ad(page_size_t(flags).equals_to(info.page_size));
+	ut_ad(fil_space_t::zip_size(flags) == info.zip_size);
+	ut_ad(fil_space_t::physical_size(flags) == info.page_size);
 
 	if (fil_space_create(dest_space_name, info.space_id, flags,
 			      FIL_TYPE_TABLESPACE, 0)) {
@@ -4818,7 +4834,7 @@ xtrabackup_apply_delta(
 	ulint	page_in_buffer;
 	ulint	incremental_buffers = 0;
 
-	xb_delta_info_t info(univ_page_size, SRV_TMP_SPACE_ID);
+	xb_delta_info_t info(srv_page_size, 0, SRV_TMP_SPACE_ID);
 	ulint		page_size;
 	ulint		page_size_shift;
 	byte*		incremental_buffer_base = NULL;
@@ -4856,7 +4872,7 @@ xtrabackup_apply_delta(
 		goto error;
 	}
 
-	page_size = info.page_size.physical();
+	page_size = info.page_size;
 	page_size_shift = get_bit_shift(page_size);
 	msg("page size for %s is %zu bytes",
 	    src_path, page_size);

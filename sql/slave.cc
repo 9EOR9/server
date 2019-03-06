@@ -482,7 +482,6 @@ handle_slave_background(void *arg __attribute__((unused)))
   thd= new THD(next_thread_id());
   thd->thread_stack= (char*) &thd;           /* Set approximate stack start */
   thd->system_thread = SYSTEM_THREAD_SLAVE_BACKGROUND;
-  thread_safe_increment32(&service_thread_count);
   thd->store_globals();
   thd->security_ctx->skip_grants();
   thd->set_command(COM_DAEMON);
@@ -568,8 +567,6 @@ handle_slave_background(void *arg __attribute__((unused)))
   mysql_mutex_unlock(&LOCK_slave_background);
 
   delete thd;
-  thread_safe_decrement32(&service_thread_count);
-  signal_thd_deleted();
 
   my_thread_end();
   return 0;
@@ -3578,7 +3575,6 @@ static int init_slave_thread(THD* thd, Master_info *mi,
 
   thd->system_thread = (thd_type == SLAVE_THD_SQL) ?
     SYSTEM_THREAD_SLAVE_SQL : SYSTEM_THREAD_SLAVE_IO;
-  thread_safe_increment32(&service_thread_count);
 
   /* We must call store_globals() before doing my_net_init() */
   if (init_thr_lock() || thd->store_globals() ||
@@ -4698,7 +4694,7 @@ pthread_handler_t handle_slave_io(void *arg)
     goto err_during_init;
   }
   thd->system_thread_info.rpl_io_info= &io_info;
-  add_to_active_threads(thd);
+  server_threads.insert(thd);
   mi->slave_running = MYSQL_SLAVE_RUN_NOT_CONNECT;
   mi->abort_slave = 0;
   mysql_mutex_unlock(&mi->run_lock);
@@ -5080,7 +5076,7 @@ err:
     flush_master_info(mi, TRUE, TRUE);
   THD_STAGE_INFO(thd, stage_waiting_for_slave_mutex_on_exit);
   thd->add_status_to_global();
-  unlink_not_visible_thd(thd);
+  server_threads.erase(thd);
   mysql_mutex_lock(&mi->run_lock);
 
 err_during_init:
@@ -5092,8 +5088,6 @@ err_during_init:
 
   thd->assert_not_linked();
   delete thd;
-  thread_safe_decrement32(&service_thread_count);
-  signal_thd_deleted();
 
   mi->abort_slave= 0;
   mi->slave_running= MYSQL_SLAVE_NOT_RUN;
@@ -5368,7 +5362,7 @@ pthread_handler_t handle_slave_sql(void *arg)
   /* Ensure that slave can exeute any alter table it gets from master */
   thd->variables.alter_algorithm= (ulong) Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT;
 
-  add_to_active_threads(thd);
+  server_threads.insert(thd);
   /*
     We are going to set slave_running to 1. Assuming slave I/O thread is
     alive and connected, this is going to make Seconds_Behind_Master be 0
@@ -5714,7 +5708,7 @@ pthread_handler_t handle_slave_sql(void *arg)
   }
   THD_STAGE_INFO(thd, stage_waiting_for_slave_mutex_on_exit);
   thd->add_status_to_global();
-  unlink_not_visible_thd(thd);
+  server_threads.erase(thd);
   mysql_mutex_lock(&rli->run_lock);
 
 err_during_init:
@@ -5786,8 +5780,6 @@ err_during_init:
 
   delete serial_rgi;
   delete thd;
-  thread_safe_decrement32(&service_thread_count);
-  signal_thd_deleted();
 
   DBUG_LEAVE;                                   // Must match DBUG_ENTER()
   my_thread_end();

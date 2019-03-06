@@ -1,5 +1,5 @@
-/* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB Corporation.
+/* Copyright (c) 2000, 2018, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2019, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -3994,7 +3994,7 @@ int MYSQL_BIN_LOG::find_log_pos(LOG_INFO *linfo, const char *log_name,
     // if the log entry matches, null string matching anything
     if (!log_name ||
         (log_name_len == fname_len &&
-	 !memcmp(full_fname, full_log_name, log_name_len)))
+	 !strncmp(full_fname, full_log_name, log_name_len)))
     {
       DBUG_PRINT("info", ("Found log file entry"));
       linfo->index_file_start_offset= offset;
@@ -7686,7 +7686,7 @@ MYSQL_BIN_LOG::write_transaction_to_binlog_events(group_commit_entry *entry)
 {
   int is_leader= queue_for_group_commit(entry);
 #ifdef WITH_WSREP
-  if (is_leader >= 0 &&
+  if (wsrep_run_commit_hook(entry->thd, true) && is_leader >= 0 &&
       wsrep_ordered_commit(entry->thd, entry->all, wsrep_apply_error()))
     return true;
 #endif /* WITH_WSREP */
@@ -10486,7 +10486,7 @@ set_binlog_snapshot_file(const char *src)
   Copy out current values of status variables, for SHOW STATUS or
   information_schema.global_status.
 
-  This is called only under LOCK_show_status, so we can fill in a static array.
+  This is called only under LOCK_all_status_vars, so we can fill in a static array.
 */
 void
 TC_LOG_BINLOG::set_status_variables(THD *thd)

@@ -850,12 +850,16 @@ void close_thread_tables(THD *thd)
   DBUG_ASSERT(thd->transaction.stmt.is_empty() || thd->in_sub_stmt ||
               (thd->state_flags & Open_tables_state::BACKUPS_AVAIL));
 
-  /* Detach MERGE children after every statement. Even under LOCK TABLES. */
   for (table= thd->open_tables; table; table= table->next)
   {
+    if (table->update_handler)
+      table->delete_update_handler();
+
     /* Table might be in use by some outer statement. */
     DBUG_PRINT("tcache", ("table: '%s'  query_id: %lu",
                           table->s->table_name.str, (ulong) table->query_id));
+
+    /* Detach MERGE children after every statement. Even under LOCK TABLES. */
     if (thd->locked_tables_mode <= LTM_LOCK_TABLES ||
         table->query_id == thd->query_id)
     {
@@ -8694,11 +8698,11 @@ fill_record(THD *thd, TABLE *table, Field **ptr, List<Item> &values,
     goto err;
   /* Update virtual fields */
   thd->abort_on_warning= FALSE;
+  if (table->versioned())
+    table->vers_update_fields();
   if (table->vfield &&
       table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_WRITE))
     goto err;
-  if (table->versioned())
-    table->vers_update_fields();
   thd->abort_on_warning= abort_on_warning_saved;
   DBUG_RETURN(thd->is_error());
 

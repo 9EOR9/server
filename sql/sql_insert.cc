@@ -1497,7 +1497,7 @@ bool mysql_prepare_insert(THD *thd, TABLE_LIST *table_list,
     DBUG_RETURN(TRUE); 
   if (table_list->handle_derived(thd->lex, DT_MERGE_FOR_INSERT))
     DBUG_RETURN(TRUE); 
-  if (mysql_handle_list_of_derived(thd->lex, table_list, DT_PREPARE))
+  if (thd->lex->handle_list_of_derived(table_list, DT_PREPARE))
     DBUG_RETURN(TRUE); 
   /*
     For subqueries in VALUES() we should not see the table in which we are
@@ -1590,7 +1590,6 @@ bool mysql_prepare_insert(THD *thd, TABLE_LIST *table_list,
       DBUG_RETURN(TRUE);
     }
     select_lex->fix_prepare_information(thd, &fake_conds, &fake_conds);
-    select_lex->first_execution= 0;
   }
   /*
     Only call prepare_for_posistion() if we are not performing a DELAYED
@@ -1744,10 +1743,8 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
 	was used.  This ensures that we don't get a problem when the
 	whole range of the key has been used.
       */
-      if (info->handle_duplicates == DUP_REPLACE &&
-          table->next_number_field &&
-          key_nr == table->s->next_number_index &&
-	  (insert_id_for_cur_row > 0))
+      if (info->handle_duplicates == DUP_REPLACE && table->next_number_field &&
+          key_nr == table->s->next_number_index && insert_id_for_cur_row > 0)
 	goto err;
       if (table->file->ha_table_flags() & HA_DUPLICATE_POS)
       {
@@ -1958,7 +1955,6 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
           }
           else
             error= 0;   // error was HA_ERR_RECORD_IS_THE_SAME
-          thd->record_first_successful_insert_id_in_cur_stmt(table->file->insert_id_for_cur_row);
           /*
             Since we pretend that we have done insert we should call
             its after triggers.
@@ -2014,7 +2010,6 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
     if (table->file->insert_id_for_cur_row == 0)
       table->file->insert_id_for_cur_row= insert_id_for_cur_row;
       
-    thd->record_first_successful_insert_id_in_cur_stmt(table->file->insert_id_for_cur_row);
     /*
       Restore column maps if they where replaced during an duplicate key
       problem.
@@ -2188,11 +2183,11 @@ public:
     mysql_mutex_init(key_delayed_insert_mutex, &mutex, MY_MUTEX_INIT_FAST);
     mysql_cond_init(key_delayed_insert_cond, &cond, NULL);
     mysql_cond_init(key_delayed_insert_cond_client, &cond_client, NULL);
-    mysql_mutex_lock(&LOCK_thread_count);
+    mysql_mutex_lock(&LOCK_delayed_insert);
     delayed_insert_threads++;
+    mysql_mutex_unlock(&LOCK_delayed_insert);
     delayed_lock= global_system_variables.low_priority_updates ?
                                           TL_WRITE_LOW_PRIORITY : TL_WRITE;
-    mysql_mutex_unlock(&LOCK_thread_count);
     DBUG_VOID_RETURN;
   }
   ~Delayed_insert()
@@ -2210,15 +2205,9 @@ public:
     mysql_cond_destroy(&cond);
     mysql_cond_destroy(&cond_client);
 
-    /*
-      We could use unlink_not_visible_threads() here, but as
-      delayed_insert_threads also needs to be protected by
-      the LOCK_thread_count mutex, we open code this.
-    */
-    mysql_mutex_lock(&LOCK_thread_count);
-    thd.unlink();				// Must be unlinked under lock
+    server_threads.erase(&thd);
+    mysql_mutex_assert_owner(&LOCK_delayed_insert);
     delayed_insert_threads--;
-    mysql_mutex_unlock(&LOCK_thread_count);
 
     my_free(thd.query());
     thd.security_ctx->user= 0;
@@ -2940,7 +2929,7 @@ pthread_handler_t handle_delayed_insert(void *arg)
   pthread_detach_this_thread();
   /* Add thread to THD list so that's it's visible in 'show processlist' */
   thd->set_start_time();
-  add_to_active_threads(thd);
+  server_threads.insert(thd);
   if (abort_loop)
     thd->set_killed(KILL_CONNECTION);
   else
@@ -4153,10 +4142,8 @@ Field *Item::create_field_for_create_select(TABLE *table)
   @retval 0         Error
 */
 
-TABLE *select_create::create_table_from_items(THD *thd,
-                                      List<Item> *items,
-                                      MYSQL_LOCK **lock,
-                                      TABLEOP_HOOKS *hooks)
+TABLE *select_create::create_table_from_items(THD *thd, List<Item> *items,
+                                      MYSQL_LOCK **lock, TABLEOP_HOOKS *hooks)
 {
   TABLE tmp_table;		// Used during 'Create_field()'
   TABLE_SHARE share;
@@ -4178,8 +4165,7 @@ TABLE *select_create::create_table_from_items(THD *thd,
   if (!opt_explicit_defaults_for_timestamp)
     promote_first_timestamp_column(&alter_info->create_list);
 
-  if (create_info->vers_fix_system_fields(thd, alter_info, *create_table,
-                                          true))
+  if (create_info->fix_create_fields(thd, alter_info, *create_table, true))
     DBUG_RETURN(NULL);
 
   while ((item=it++))
@@ -4218,7 +4204,7 @@ TABLE *select_create::create_table_from_items(THD *thd,
     alter_info->create_list.push_back(cr_field, thd->mem_root);
   }
 
-  if (create_info->vers_check_system_fields(thd, alter_info, *create_table))
+  if (create_info->check_fields(thd, alter_info, *create_table))
     DBUG_RETURN(NULL);
 
   DEBUG_SYNC(thd,"create_table_select_before_create");
