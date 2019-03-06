@@ -564,7 +564,7 @@ bool ROLE_GRANT_PAIR::init(MEM_ROOT *mem, const char *username,
 #define ACL_KEY_LENGTH (IP_ADDR_STRLEN + 1 + NAME_LEN + \
                         1 + USERNAME_LENGTH + 1)
 
-#if defined(HAVE_OPENSSL)
+#if defined(HAVE_SSL)
 /*
   Without SSL the handshake consists of one packet. This packet
   has both client capabilities and scrambled password.
@@ -579,7 +579,7 @@ bool ROLE_GRANT_PAIR::init(MEM_ROOT *mem, const char *username,
 #define MIN_HANDSHAKE_SIZE      2
 #else
 #define MIN_HANDSHAKE_SIZE      6
-#endif /* HAVE_OPENSSL && !EMBEDDED_LIBRARY */
+#endif /* HAVE_SSL && !EMBEDDED_LIBRARY */
 #define NORMAL_HANDSHAKE_SIZE   6
 
 #define ROLE_ASSIGN_COLUMN_IDX  44
@@ -12026,14 +12026,15 @@ get_cached_table_access(GRANT_INTERNAL_INFO *grant_internal_info,
 
 /* few defines to have less ifdef's in the code below */
 #ifdef EMBEDDED_LIBRARY
-#undef HAVE_OPENSSL
+#undef HAVE_SSL
+#uncdef HAVE_OPENSSL
 #ifdef NO_EMBEDDED_ACCESS_CHECKS
 #define initialized 0
 #define check_for_max_user_connections(X,Y)   0
 #define get_or_create_user_conn(A,B,C,D) 0
 #endif
 #endif
-#ifndef HAVE_OPENSSL
+#ifndef HAVE_SSL
 #define ssl_acceptor_fd 0
 #define sslaccept(A,B,C,D) 1
 #endif
@@ -13063,7 +13064,7 @@ static void server_mpvio_info(MYSQL_PLUGIN_VIO *vio,
 
 static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
 {
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   Vio *vio= thd->net.vio;
   SSL *ssl= (SSL *) vio->ssl_arg;
   X509 *cert;
@@ -13079,7 +13080,7 @@ static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
   case SSL_TYPE_NOT_SPECIFIED:                  // Impossible
   case SSL_TYPE_NONE:                           // SSL is not required
     return 0;
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   case SSL_TYPE_ANY:                            // Any kind of SSL is ok
     return vio_type(vio) != VIO_TYPE_SSL;
   case SSL_TYPE_X509: /* Client should have any valid certificate. */
@@ -13100,8 +13101,8 @@ static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
     return 1;
   case SSL_TYPE_SPECIFIED: /* Client should have specified attrib */
     /* If a cipher name is specified, we compare it to actual cipher in use. */
-    if (vio_type(vio) != VIO_TYPE_SSL ||
-        SSL_get_verify_result(ssl) != X509_V_OK)
+    if (vio_type(vio) != VIO_TYPE_SSL)
+/* || SSL_get_verify_result(ssl) != X509_V_OK) */
       return 1;
     if (acl_user->ssl_cipher)
     {
@@ -13125,6 +13126,7 @@ static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
     /* If X509 issuer is specified, we check it... */
     if (acl_user->x509_issuer[0])
     {
+#if defined(HAVE_OPENSSL)
       char *ptr= X509_NAME_oneline(X509_get_issuer_name(cert), 0, 0);
       DBUG_PRINT("info", ("comparing issuers: '%s' and '%s'",
                          acl_user->x509_issuer, ptr));
@@ -13138,10 +13140,18 @@ static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
         return 1;
       }
       free(ptr);
+#elif defined(HAVE_NSS)
+      if (!SSL_CTX_check_cert_attributes(cert, (char *)acl_user->x509_issuer, ATTR_ISSUER))
+      {
+        X509_free(cert);
+        return 1;
+      }
+#endif
     }
     /* X509 subject is specified, we check it .. */
     if (acl_user->x509_subject[0])
     {
+#if defined(HAVE_OPENSSL)
       char *ptr= X509_NAME_oneline(X509_get_subject_name(cert), 0, 0);
       DBUG_PRINT("info", ("comparing subjects: '%s' and '%s'",
                          acl_user->x509_subject, ptr));
@@ -13155,6 +13165,13 @@ static bool acl_check_ssl(THD *thd, const ACL_USER *acl_user)
         return 1;
       }
       free(ptr);
+#elif defined(HAVE_NSS)
+      if (!SSL_CTX_check_cert_attributes(cert, (char *)acl_user->x509_subject, ATTR_SUBJECT))
+      {
+        X509_free(cert);
+        return 1;
+     }
+#endif
     }
     X509_free(cert);
     return 0;

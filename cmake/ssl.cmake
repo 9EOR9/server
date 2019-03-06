@@ -16,6 +16,7 @@
 
 # We support different versions of SSL:
 # - "bundled" uses source code in <source dir>/extra/yassl
+# - "nss" uses network security services library
 # - "system"  (typically) uses headers/libraries in /usr/lib and /usr/lib64
 # - a custom installation of openssl can be used like this
 #     - cmake -DCMAKE_PREFIX_PATH=</path/to/custom/openssl> -DWITH_SSL="system"
@@ -34,12 +35,15 @@
 # perl and nmake. You might also need to
 #   'set path=</path/to/custom/openssl>\bin;%PATH%
 # in order to find the .dll files at runtime.
+INCLUDE(FindPkgConfig)
 
 SET(WITH_SSL_DOC "bundled (use yassl)")
 SET(WITH_SSL_DOC
   "${WITH_SSL_DOC}, yes (prefer os library if present, otherwise use bundled)")
 SET(WITH_SSL_DOC
   "${WITH_SSL_DOC}, system (use os library)")
+SET(WITH_SSL_DOC
+  "${WITH_SSL_DOC}, nss (use network security services library)")
 SET(WITH_SSL_DOC
   "${WITH_SSL_DOC}, </path/to/custom/installation>")
 
@@ -116,6 +120,23 @@ MACRO (MYSQL_CHECK_SSL)
       UNSET(OPENSSL_SSL_LIBRARY)
       UNSET(OPENSSL_SSL_LIBRARY CACHE)
     ENDIF()
+  ELSEIF(WITH_SSL STREQUAL "nss")
+    PKG_SEARCH_MODULE(NSS required nss)
+    IF(NSS_FOUND)
+      SET(SSL_LIBRARIES ${NSS_LINK_LIBRARIES})
+      MESSAGE(STATUS "SSL_LIBRARIES ${SSL_LIBRARIES}")
+      # We also need the nss pem library to read pem files 
+      FIND_LIBRARY(NSSPEMLIB NAMES "nsspem")
+      IF(NSSPEMLIB STREQUAL "NSSPEMLIB-NOTFOUND")
+        MESSAGE(FATAL_ERROR "nsspem library not found.")
+      ENDIF()
+      SET(SSL_DEFINES "-DHAVE_NSS -DHAVE_SSL -DPKCS11_PEM_MODULE")
+      SET(SSL_INCLUDE_DIRS ${NSS_INCLUDE_DIRS})
+      SET(HAVE_EncryptAes128Gcm OFF CACHE INTERNAL "nss doesn't fully support AES-GCM")
+      SET(HAVE_EncryptAes128Ctr ON CACHE INTERNAL "")
+    ELSE()
+      MESSAGE(FATAL_ERROR "nss library not found.")
+    ENDIF()
   ELSEIF(WITH_SSL STREQUAL "system" OR
          WITH_SSL STREQUAL "yes" OR
          WITH_SSL_PATH
@@ -145,7 +166,7 @@ MACRO (MYSQL_CHECK_SSL)
       MESSAGE_ONCE(SSL_LIBRARIES "SSL_LIBRARIES = ${SSL_LIBRARIES}")
       SET(SSL_INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR})
       SET(SSL_INTERNAL_INCLUDE_DIRS "")
-      SET(SSL_DEFINES "-DHAVE_OPENSSL")
+      SET(SSL_DEFINES "-DHAVE_OPENSSL -DHAVE_SSL")
 
       SET(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
       SET(CMAKE_REQUIRED_LIBRARIES ${SSL_LIBRARIES})

@@ -18,5 +18,8 @@ ${SSL_INCLUDE_DIRS})
 ADD_DEFINITIONS(${SSL_DEFINES})
 
 SET(VIO_SOURCES vio.c viosocket.c viossl.c viopipe.c viosslfactories.c)
+IF(WITH_SSL STREQUAL "nss")
+  SET(VIO_SOURCES ${VIO_SOURCES} nss_compat/ssl.c nss_compat/rand.c nss_compat/log.c)
+ENDIF()
 ADD_CONVENIENCE_LIBRARY(vio ${VIO_SOURCES})
 TARGET_LINK_LIBRARIES(vio ${LIBSOCKET})

@@ -17,7 +17,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
 
   {"ssl", OPT_SSL_SSL,
    "Enable SSL for connection (automatically enabled with other flags).",

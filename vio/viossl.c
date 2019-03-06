@@ -24,7 +24,7 @@
 #include "my_context.h"
 #include <mysql_async.h>
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
 
 #ifdef HAVE_YASSL
 /*
@@ -142,10 +142,11 @@ size_t vio_ssl_read(Vio *vio, uchar *buf, size_t size)
   DBUG_PRINT("enter", ("sd: %d  buf: %p  size: %zu  ssl: %p",
 		       (int)mysql_socket_getfd(vio->mysql_socket), buf, size,
                        vio->ssl_arg));
-
+#ifdef CLIENT
   if (vio->async_context && vio->async_context->active)
     ret= my_ssl_read_async(vio->async_context, (SSL *)vio->ssl_arg, buf, (int)size);
   else
+#endif
   {
     while ((ret= SSL_read(ssl, buf, (int)size)) < 0)
     {
@@ -174,11 +175,12 @@ size_t vio_ssl_write(Vio *vio, const uchar *buf, size_t size)
   DBUG_PRINT("enter", ("sd: %d  buf: %p  size: %zu",
                        (int)mysql_socket_getfd(vio->mysql_socket),
                        buf, size));
-
+#ifdef CLIENT
   if (vio->async_context && vio->async_context->active)
     ret= my_ssl_write_async(vio->async_context, (SSL *)vio->ssl_arg, buf,
                             (int)size);
   else
+#endif
   {
     while ((ret= SSL_write(ssl, buf, (int)size)) < 0)
     {
@@ -232,7 +234,9 @@ int vio_ssl_close(Vio *vio)
     describing with length, we aren't vunerable to these attacks. Therefore,
     we just shutdown by closing the socket (quiet shutdown).
     */
-    SSL_set_quiet_shutdown(ssl, 1); 
+#ifdef HAVE_OPENSSL
+    SSL_set_quiet_shutdown(ssl, 1);
+#endif
     
     switch ((r= SSL_shutdown(ssl))) {
     case 1:
@@ -330,9 +334,17 @@ static int ssl_do(struct st_VioSSLFd *ptr, Vio *vio, long timeout,
     *errptr= ERR_get_error();
     DBUG_RETURN(1);
   }
+
+#if defined(HAVE_NSS)
+  /* Store vio */
+  SSL_set_ex_data(ssl, 0, vio);
+#endif
+
   DBUG_PRINT("info", ("ssl: %p timeout: %ld", ssl, timeout));
+#ifdef HAVE_OPENSSL
   SSL_clear(ssl);
   SSL_SESSION_set_timeout(SSL_get_session(ssl), timeout);
+#endif
   SSL_set_fd(ssl, (int)sd);
 
   /*
@@ -391,13 +403,14 @@ static int ssl_do(struct st_VioSSLFd *ptr, Vio *vio, long timeout,
     }
     else
       DBUG_PRINT("info",("Peer does not have certificate."));
-
+#ifdef HAVE_OPENSSL
     if (SSL_get_shared_ciphers(ssl, buf, sizeof(buf)))
     {
       DBUG_PRINT("info",("shared_ciphers: '%s'", buf));
     }
     else
       DBUG_PRINT("info",("no shared ciphers!"));
+#endif
   }
 #endif
 

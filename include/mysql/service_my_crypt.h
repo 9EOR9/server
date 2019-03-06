@@ -49,7 +49,7 @@ extern "C" {
 
 enum my_aes_mode {
     MY_AES_ECB, MY_AES_CBC
-#ifdef HAVE_EncryptAes128Ctr
+#if defined(HAVE_EncryptAes128Ctr) || defined(HAVE_NSS)
   , MY_AES_CTR
 #endif
 #ifdef HAVE_EncryptAes128Gcm

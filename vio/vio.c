@@ -22,7 +22,11 @@
 */
 
 #include "vio_priv.h"
+#if defined(HAVE_NSS)
+#include "nss_compat_ossl.h"
+#elif defined(HAVE_OPENSSL)
 #include "ssl_compat.h"
+#endif
 
 #ifdef _WIN32
 
@@ -105,7 +109,7 @@ static void vio_init(Vio *vio, enum enum_vio_type type,
   }
 #endif
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   if (type == VIO_TYPE_SSL)
   {
     vio->viodelete	=vio_ssl_delete;
@@ -187,7 +191,7 @@ my_bool vio_reset(Vio* vio, enum enum_vio_type type,
   /* Preserve perfschema info for this connection */
   vio->mysql_socket.m_psi= old_vio.mysql_socket.m_psi;
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   vio->ssl_arg= ssl;
 #endif
 

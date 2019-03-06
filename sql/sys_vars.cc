@@ -64,7 +64,11 @@
 #include "rpl_parallel.h"
 #include "semisync_master.h"
 #include "semisync_slave.h"
+#if defined(HAVE_OPENSSL)
 #include <ssl_compat.h>
+#elif defined(HAVE_NSS)
+#include <nss_compat_ossl.h>
+#endif
 
 /*
   The rule for this file: everything should be 'static'. When a sys_var
@@ -3421,7 +3425,7 @@ static Sys_var_set Sys_old_behavior(
        SESSION_VAR(old_behavior), CMD_LINE(REQUIRED_ARG),
        old_mode_names, DEFAULT(0));
 
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
 #define SSL_OPT(X) CMD_LINE(REQUIRED_ARG,X)
 #else
 #define SSL_OPT(X) NO_CMD_LINE
@@ -4655,7 +4659,7 @@ static Sys_var_have Sys_have_geometry(
 
 static Sys_var_have Sys_have_openssl(
        "have_openssl", "Comparing have_openssl with have_ssl will indicate whether "
-       "YaSSL or openssl was used. If YaSSL, have_ssl will be YES, but have_openssl "
+       "YaSSL, NSS or openssl was used. If YaSSL or NSS, have_ssl will be YES, but have_openssl "
        "will be NO.",
        READ_ONLY GLOBAL_VAR(have_openssl), NO_CMD_LINE);
 

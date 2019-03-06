@@ -346,7 +346,7 @@ int main(int argc,char *argv[])
     uint tmp=opt_connect_timeout;
     mysql_options(&mysql,MYSQL_OPT_CONNECT_TIMEOUT, (char*) &tmp);
   }
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   if (opt_use_ssl)
   {
     mysql_ssl_set(&mysql, opt_ssl_key, opt_ssl_cert, opt_ssl_ca,

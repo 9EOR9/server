@@ -53,7 +53,7 @@
     printf("\"\n");                                     \
   } while(0);
 
-#ifndef HAVE_EncryptAes128Ctr
+#if !defined HAVE_EncryptAes128Ctr && !defined(HAVE_NSS)
 const uint MY_AES_CTR=0xDEADBEAF;
 #endif
 #ifndef HAVE_EncryptAes128Gcm

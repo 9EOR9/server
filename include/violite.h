@@ -127,7 +127,10 @@ int vio_getnameinfo(const struct sockaddr *sa,
                     char *port, size_t port_size,
                     int flags);
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
+#if defined(HAVE_NSS)
+#include <nss_compat_ossl.h>
+#elif defined(HAVE_OPENSSL)
 /* apple deprecated openssl in MacOSX Lion */
 #ifdef __APPLE__
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -137,13 +140,13 @@ int vio_getnameinfo(const struct sockaddr *sa,
 #define YASSL_MYSQL_COMPATIBLE
 #ifndef YASSL_PREFIX
 #define YASSL_PREFIX
-#endif
-/* Set yaSSL to use same type as MySQL do for socket handles */
+  #endif
+/ Set yaSSL to use same type as MySQL do for socket handles */
 typedef my_socket YASSL_SOCKET_T;
 #define YASSL_SOCKET_T_DEFINED
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-
+#endif
 enum enum_ssl_init_error
 {
   SSL_INITERR_NOERROR= 0, SSL_INITERR_CERT, SSL_INITERR_KEY,
@@ -171,7 +174,7 @@ struct st_VioSSLFd
 		      const char *cipher, enum enum_ssl_init_error *error,
                       const char *crl_file, const char *crl_path);
 void free_vio_ssl_acceptor_fd(struct st_VioSSLFd *fd);
-#endif /* HAVE_OPENSSL */
+#endif /* HAVE_SSL */
 
 void vio_end(void);
 
@@ -255,7 +258,7 @@ struct st_vio
   my_bool (*has_data) (Vio*);
   int (*io_wait)(Vio*, enum enum_vio_io_event, int);
   my_bool (*connect)(Vio*, struct sockaddr *, socklen_t, int);
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   void	  *ssl_arg;
 #endif
 #ifdef _WIN32

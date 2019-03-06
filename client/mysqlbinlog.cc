@@ -2105,7 +2105,7 @@ static Exit_status safe_connect()
     return ERROR_STOP;
   }
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   if (opt_use_ssl)
   {
     mysql_ssl_set(mysql, opt_ssl_key, opt_ssl_cert, opt_ssl_ca,

@@ -214,7 +214,7 @@ my_io_wait_async(struct mysql_async_context *b, enum enum_vio_io_event event,
 }
 
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
 static my_bool
 my_ssl_async_check_result(int res, struct mysql_async_context *b, SSL *ssl)
 {
@@ -264,7 +264,7 @@ my_ssl_write_async(struct mysql_async_context *b, SSL *ssl,
       return res;
   }
 }
-#endif  /* HAVE_OPENSSL */
+#endif  /* HAVE_SSL */
 
 /*
   Legacy support of the MariaDB 5.5 version, where timeouts where only in

@@ -81,7 +81,9 @@
 #include "sql_callback.h"
 #include "threadpool.h"
 
-#ifdef HAVE_OPENSSL
+#if defined(HAVE_NSS)
+#include <nss_compat_ossl.h>
+#elif defined(HAVE_OPENSSL)
 #include <ssl_compat.h>
 #endif
 
@@ -1497,6 +1499,7 @@ static scheduler_functions thread_scheduler_struct, extra_thread_scheduler_struc
 scheduler_functions *thread_scheduler= &thread_scheduler_struct,
                     *extra_thread_scheduler= &extra_thread_scheduler_struct;
 
+#ifdef HAVE_SSL
 #ifdef HAVE_OPENSSL
 #include <openssl/crypto.h>
 #ifdef HAVE_OPENSSL10
@@ -1512,10 +1515,11 @@ static void openssl_lock_function(int, int, const char *, int);
 static void openssl_lock(int, openssl_lock_t *, const char *, int);
 #endif /* HAVE_OPENSSL10 */
 char *des_key_file;
+#endif /* HAVE_OPENSSL */
 #ifndef EMBEDDED_LIBRARY
 struct st_VioSSLFd *ssl_acceptor_fd;
 #endif
-#endif /* HAVE_OPENSSL */
+#endif /* HAVE_SSL */
 
 /**
   Number of currently active user connections. The variable is protected by
@@ -4092,12 +4096,14 @@ static int init_common_variables()
     exit(1);
   }
 
-#ifdef HAVE_OPENSSL
+#if defined(HAVE_OPENSSL)
   if (check_openssl_compatibility())
   {
     sql_print_error("Incompatible OpenSSL version. Cannot continue...");
     exit(1);
   }
+#elif defined(HAVE_NSS)
+  SSL_library_init();
 #endif
 
   if (init_thread_environment() || mysql_init_variables())
@@ -4823,9 +4829,12 @@ struct SSL_ACCEPTOR_STATS
   void init()
   {
     DBUG_ASSERT(ssl_acceptor_fd !=0 && ssl_acceptor_fd->ssl_context != 0);
+#if defined(HAVE_SSL)
     SSL_CTX *ctx= ssl_acceptor_fd->ssl_context;
+#endif
     accept= 0;
     accept_good= 0;
+#if defined(HAVE_OPENSSL)
     verify_mode= SSL_CTX_get_verify_mode(ctx);
     verify_depth= SSL_CTX_get_verify_depth(ctx);
     cache_size= SSL_CTX_sess_get_cache_size(ctx);
@@ -4846,6 +4855,11 @@ struct SSL_ACCEPTOR_STATS
     default:
       session_cache_mode= "Unknown"; break;
     }
+#elif defined(HAVE_NSS)
+    verify_mode= verify_depth= 0;
+    cache_size= 0;
+    session_cache_mode= "OFF";
+#endif
   }
 };
 
@@ -4859,7 +4873,7 @@ void ssl_acceptor_stats_update(int sslaccept_ret)
 
 static void init_ssl()
 {
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
   if (opt_use_ssl)
   {
     enum enum_ssl_init_error error= SSL_INITERR_NOERROR;
@@ -4884,6 +4898,9 @@ static void init_ssl()
     {
       ulong err;
       while ((err= ERR_get_error()))
+#ifdef HAVE_NSS
+        if (err != -8025)
+#endif     
         sql_print_warning("SSL error: %s", ERR_error_string(err, NULL));
     }
     else
@@ -4893,15 +4910,17 @@ static void init_ssl()
   {
     have_ssl= SHOW_OPTION_DISABLED;
   }
+#ifdef HAVE_OPENSSL
   if (des_key_file)
     load_des_key_file(des_key_file);
-#endif /* HAVE_OPENSSL && ! EMBEDDED_LIBRARY */
+#endif
+#endif /* HAVE_SSL && ! EMBEDDED_LIBRARY */
 }
 
 /* Reinitialize SSL (FLUSH SSL) */
 int reinit_ssl()
 {
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
   if (!opt_use_ssl)
     return 0;
 
@@ -4929,13 +4948,14 @@ int reinit_ssl()
 
 static void end_ssl()
 {
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
 #ifndef EMBEDDED_LIBRARY
   if (ssl_acceptor_fd)
   {
     free_vio_ssl_acceptor_fd(ssl_acceptor_fd);
     ssl_acceptor_fd= 0;
   }
+  SSL_library_end();
 #endif /* ! EMBEDDED_LIBRARY */
 #endif /* HAVE_OPENSSL */
 }
@@ -7234,7 +7254,7 @@ struct my_option my_long_options[]=
    "(Default: 15000).", &slow_start_timeout, &slow_start_timeout, 0,
    GET_ULONG, REQUIRED_ARG, 15000, 0, 0, 0, 0, 0},
 #endif
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
   {"ssl", 0,
    "Enable SSL for connection (automatically enabled if an ssl option is used).",
    &opt_use_ssl, &opt_use_ssl, 0, GET_BOOL, OPT_ARG, 0, 0, 0,
@@ -7535,9 +7555,29 @@ static int show_flush_commands(THD *thd, SHOW_VAR *var, char *buff,
   *((longlong *) buff)= (longlong)tdc_refresh_version();
   return 0;
 }
+#define SHOW_FNAME(name)                        \
+    rpl_semi_sync_master_show_##name
 
+#define DEF_SHOW_FUNC(name, show_type)                                       \
+    static  int SHOW_FNAME(name)(MYSQL_THD thd, SHOW_VAR *var, char *buff)   \
+    {                                                                        \
+      repl_semisync_master.set_export_stats();                                 \
+      var->type= show_type;                                                  \
+      var->value= (char *)&rpl_semi_sync_master_##name;                      \
+      return 0;                                                              \
+    }
 
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+DEF_SHOW_FUNC(status, SHOW_BOOL)
+DEF_SHOW_FUNC(clients, SHOW_LONG)
+DEF_SHOW_FUNC(wait_sessions, SHOW_LONG)
+DEF_SHOW_FUNC(trx_wait_time, SHOW_LONGLONG)
+DEF_SHOW_FUNC(trx_wait_num, SHOW_LONGLONG)
+DEF_SHOW_FUNC(net_wait_time, SHOW_LONGLONG)
+DEF_SHOW_FUNC(net_wait_num, SHOW_LONGLONG)
+DEF_SHOW_FUNC(avg_net_wait_time, SHOW_LONG)
+DEF_SHOW_FUNC(avg_trx_wait_time, SHOW_LONG)
+
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
 
 /*
    Functions relying on SSL
@@ -7563,9 +7603,11 @@ static int show_ssl_get_default_timeout(THD *thd, SHOW_VAR *var, char *buff,
 {
   var->type= SHOW_LONG;
   var->value= buff;
+#if defined(HAVE_OPENSSL)
   if( thd->vio_ok() && thd->net.vio->ssl_arg )
     *((long *)buff)= (long)SSL_get_default_timeout((SSL*)thd->net.vio->ssl_arg);
   else
+#endif
     *((long *)buff)= 0;
   return 0;
 }
@@ -7575,14 +7617,12 @@ static int show_ssl_get_verify_mode(THD *thd, SHOW_VAR *var, char *buff,
 {
   var->type= SHOW_LONG;
   var->value= buff;
-#ifndef HAVE_YASSL
+#if !defined(HAVE_YASSL) && !defined(HAVE_NSS)
   if( thd->net.vio && thd->net.vio->ssl_arg )
     *((long *)buff)= (long)SSL_get_verify_mode((SSL*)thd->net.vio->ssl_arg);
   else
-    *((long *)buff)= 0;
-#else
-  *((long *)buff) = 0;
 #endif
+    *((long *)buff)= 0;
   return 0;
 }
 
@@ -7591,14 +7631,12 @@ static int show_ssl_get_verify_depth(THD *thd, SHOW_VAR *var, char *buff,
 {
   var->type= SHOW_LONG;
   var->value= buff;
-#ifndef HAVE_YASSL
+#if !defined(HAVE_YASSL) && !defined(HAVE_NSS)
   if( thd->vio_ok() && thd->net.vio->ssl_arg )
     *((long *)buff)= (long)SSL_get_verify_depth((SSL*)thd->net.vio->ssl_arg);
   else
-    *((long *)buff)= 0;
-#else
-  *((long *)buff)= 0;
 #endif
+    *((long *)buff)= 0;
 
   return 0;
 }
@@ -7621,6 +7659,7 @@ static int show_ssl_get_cipher_list(THD *thd, SHOW_VAR *var, char *buff,
   var->value= buff;
   if (thd->vio_ok() && thd->net.vio->ssl_arg)
   {
+#if defined(HAVE_OPENSSL)
     int i;
     const char *p;
     char *end= buff + SHOW_VAR_FUNC_BUFF_SIZE;
@@ -7632,32 +7671,13 @@ static int show_ssl_get_cipher_list(THD *thd, SHOW_VAR *var, char *buff,
     }
     if (i)
       buff--;
+    *buff=0;
+#elif defined(HAVE_NSS)
+  na_nss_get_cipher_list((SSL *)thd->net.vio->ssl_arg, buff, SHOW_VAR_FUNC_BUFF_SIZE);
+#endif
   }
-  *buff=0;
   return 0;
 }
-
-#define SHOW_FNAME(name)                        \
-    rpl_semi_sync_master_show_##name
-
-#define DEF_SHOW_FUNC(name, show_type)                                       \
-    static  int SHOW_FNAME(name)(MYSQL_THD thd, SHOW_VAR *var, char *buff)   \
-    {                                                                        \
-      repl_semisync_master.set_export_stats();                                 \
-      var->type= show_type;                                                  \
-      var->value= (char *)&rpl_semi_sync_master_##name;                      \
-      return 0;                                                              \
-    }
-
-DEF_SHOW_FUNC(status, SHOW_BOOL)
-DEF_SHOW_FUNC(clients, SHOW_LONG)
-DEF_SHOW_FUNC(wait_sessions, SHOW_LONG)
-DEF_SHOW_FUNC(trx_wait_time, SHOW_LONGLONG)
-DEF_SHOW_FUNC(trx_wait_num, SHOW_LONGLONG)
-DEF_SHOW_FUNC(net_wait_time, SHOW_LONGLONG)
-DEF_SHOW_FUNC(net_wait_num, SHOW_LONGLONG)
-DEF_SHOW_FUNC(avg_net_wait_time, SHOW_LONG)
-DEF_SHOW_FUNC(avg_trx_wait_time, SHOW_LONG)
 
 #ifdef HAVE_YASSL
 
@@ -7667,7 +7687,7 @@ my_asn1_time_to_string(const ASN1_TIME *time, char *buf, size_t len)
   return yaSSL_ASN1_TIME_to_string(time, buf, len);
 }
 
-#else /* openssl */
+#elif defined(HAVE_OPENSSL)
 
 static char *
 my_asn1_time_to_string(const ASN1_TIME *time, char *buf, size_t len)
@@ -7694,7 +7714,16 @@ end:
   BIO_free(bio);
   return res;
 }
-
+#elif defined(HAVE_NSS)
+static char *
+my_asn1_time_to_string(PRTime time, char *buf, size_t len)
+{
+  time_t t= (time_t)(time / 1000000);   /* PR_Time stores microseconds */
+  struct tm ts= *gmtime(&t);
+  bzero(buf, len);
+  strftime(buf, len - 1, "Apr %d %H:%M:%S %Y GMT", &ts);
+  return buf;
+}
 #endif
 
 
@@ -7718,7 +7747,14 @@ show_ssl_get_server_not_before(THD *thd, SHOW_VAR *var, char *buff,
   {
     SSL *ssl= (SSL*) thd->net.vio->ssl_arg;
     X509 *cert= SSL_get_certificate(ssl);
-    const ASN1_TIME *not_before= X509_get0_notBefore(cert);
+
+#if defined(HAVE_NSS)
+    PRTime not_before, not_after;
+    CERT_GetCertTimes(cert->cert, &not_before, &not_after);
+#elif defined(HAVE_OPENSSL)
+    const ASN1_TIME *not_before;
+    not_before= X509_get0_notBefore(cert);
+#endif
 
     var->value= my_asn1_time_to_string(not_before, buff,
                                        SHOW_VAR_FUNC_BUFF_SIZE);
@@ -7752,7 +7788,13 @@ show_ssl_get_server_not_after(THD *thd, SHOW_VAR *var, char *buff,
   {
     SSL *ssl= (SSL*) thd->net.vio->ssl_arg;
     X509 *cert= SSL_get_certificate(ssl);
-    const ASN1_TIME *not_after= X509_get0_notAfter(cert);
+#if defined(HAVE_NSS)
+    PRTime not_before, not_after;
+    CERT_GetCertTimes(cert->cert, &not_before, &not_after);
+#elif deinfed(HAVE_OPENSSL)
+    const ASN1_TIME *not_after;
+    not_after= X509_get0_notAfter(cert);
+#endif
 
     var->value= my_asn1_time_to_string(not_after, buff,
                                        SHOW_VAR_FUNC_BUFF_SIZE);
@@ -8037,7 +8079,7 @@ SHOW_VAR status_vars[]= {
   {"Sort_range",	       (char*) offsetof(STATUS_VAR, filesort_range_count_), SHOW_LONG_STATUS},
   {"Sort_rows",		       (char*) offsetof(STATUS_VAR, filesort_rows_), SHOW_LONG_STATUS},
   {"Sort_scan",		       (char*) offsetof(STATUS_VAR, filesort_scan_count_), SHOW_LONG_STATUS},
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
 #ifndef EMBEDDED_LIBRARY
   {"Ssl_accept_renegotiates",  (char*) &ssl_acceptor_stats.zero, SHOW_LONG},
   {"Ssl_accepts",              (char*) &ssl_acceptor_stats.accept, SHOW_LONG},
@@ -8381,9 +8423,9 @@ static int mysql_init_variables(void)
     have_profiling = SHOW_OPTION_NO;
 #endif
 
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+#if defined(HAVE_SSL) && !defined(EMBEDDED_LIBRARY)
   have_ssl=SHOW_OPTION_YES;
-#if defined(HAVE_YASSL)
+#if defined(HAVE_YASSL) || defined(HAVE_NSS)
   have_openssl= SHOW_OPTION_NO;
 #else
   have_openssl= SHOW_OPTION_YES;

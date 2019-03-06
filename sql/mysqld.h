@@ -582,7 +582,7 @@ void init_com_statement_info();
 extern pthread_t signal_thread;
 #endif
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_SSL
 extern struct st_VioSSLFd * ssl_acceptor_fd;
 #endif /* HAVE_OPENSSL */
 

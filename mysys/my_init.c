@@ -22,6 +22,11 @@
 #include <m_ctype.h>
 #include <signal.h>
 #include <mysql/psi/mysql_stage.h>
+
+#if defined(HAVE_NSS)
+#include <nss_compat_ossl.h>
+#endif
+
 #ifdef __WIN__
 #ifdef _MSC_VER
 #include <locale.h>
@@ -74,6 +79,14 @@ my_bool my_init(void)
 
   if (my_init_done)
     return 0;
+
+#if defined(HAVE_NSS)
+  if (!NSS_IsInitialized())
+  {
+    if (NSS_NoDB_Init(NULL) != SECSuccess)
+      return 1;
+  }
+#endif
 
   my_init_done= 1;
 
@@ -144,6 +157,11 @@ void my_end(int infoflag)
 
   if (!my_init_done)
     return;
+
+#if defined(HAVE_NSS)
+  if (NSS_IsInitialized())
+    NSS_Shutdown();
+#endif
 
   /*
     We do not use DBUG_ENTER here, as after cleanup DBUG is no longer

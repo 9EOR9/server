@@ -15,13 +15,19 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "vio_priv.h"
+
+#ifdef HAVE_SSL
+
+#if defined(HAVE_NSS)
+#include <nss_compat_ossl.h>
+#elif defined(HAVE_OPENSSL)
 #include <ssl_compat.h>
 
-#ifdef HAVE_OPENSSL
 #ifndef HAVE_YASSL
 #include <openssl/dh.h>
 #include <openssl/bn.h>
 #endif
+#include <ssl_compat.h>
 
 static my_bool     ssl_algorithms_added    = FALSE;
 static my_bool     ssl_error_strings_loaded= FALSE;
@@ -74,6 +80,7 @@ DH *get_dh2048()
     }
     return dh;
 }
+#endif
 
 static const char*
 ssl_error_string[] =
@@ -114,7 +121,9 @@ vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
   {
     *error= SSL_INITERR_CERT;
     DBUG_PRINT("error",("%s from file '%s'", sslGetErrString(*error), cert_file));
+#ifdef HAVE_OPENSSL
     DBUG_EXECUTE("error", ERR_print_errors_fp(DBUG_FILE););
+#endif
     fprintf(stderr, "SSL error: %s from '%s'\n", sslGetErrString(*error),
             cert_file);
     fflush(stderr);
@@ -126,7 +135,9 @@ vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
   {
     *error= SSL_INITERR_KEY;
     DBUG_PRINT("error", ("%s from file '%s'", sslGetErrString(*error), key_file));
+#ifdef HAVE_OPENSSL
     DBUG_EXECUTE("error", ERR_print_errors_fp(DBUG_FILE););
+#endif
     fprintf(stderr, "SSL error: %s from '%s'\n", sslGetErrString(*error),
             key_file);
     fflush(stderr);
@@ -141,7 +152,9 @@ vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
   {
     *error= SSL_INITERR_NOMATCH;
     DBUG_PRINT("error", ("%s",sslGetErrString(*error)));
+#ifdef HAVE_OPENSSL
     DBUG_EXECUTE("error", ERR_print_errors_fp(DBUG_FILE););
+#endif
     fprintf(stderr, "SSL error: %s\n", sslGetErrString(*error));
     fflush(stderr);
     DBUG_RETURN(1);
@@ -153,6 +166,7 @@ vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
 
 static void check_ssl_init()
 {
+#if defined(HAVE_OPENSSL)
   if (!ssl_algorithms_added)
   {
     ssl_algorithms_added= TRUE;
@@ -164,6 +178,10 @@ static void check_ssl_init()
     ssl_error_strings_loaded= TRUE;
     SSL_load_error_strings();
   }
+#elif defined(HAVE_NSS)
+  if (!NSS_IsInitialized())
+    SSL_library_init();
+#endif
 }
 
 /************************ VioSSLFd **********************************/
@@ -174,7 +192,9 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
              enum enum_ssl_init_error *error,
              const char *crl_file, const char *crl_path)
 {
+#ifdef HAVE_OPENSSL
   DH *dh;
+#endif
   struct st_VioSSLFd *ssl_fd;
   long ssl_ctx_options= SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
   DBUG_ENTER("new_VioSSLFd");
@@ -211,7 +231,6 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
     none of the provided ciphers could be selected
   */
   if (cipher &&
-      SSL_CTX_set_ciphersuites(ssl_fd->ssl_context, cipher) == 0 &&
       SSL_CTX_set_cipher_list(ssl_fd->ssl_context, cipher) == 0)
   {
     *error= SSL_INITERR_CIPHERS;
@@ -247,7 +266,7 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
 #ifdef HAVE_YASSL
     DBUG_PRINT("warning", ("yaSSL doesn't support CRL"));
     DBUG_ASSERT(0);
-#else
+#elif defined(HAVE_OPENSSL)
     X509_STORE *store= SSL_CTX_get_cert_store(ssl_fd->ssl_context);
     /* Load crls from the trusted ca */
     if (X509_STORE_load_locations(store, crl_file, crl_path) == 0 ||
@@ -269,6 +288,7 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
     goto err2;
   }
 
+#ifdef HAVE_OPENSSL
   /* DH stuff */
   if (!is_client_method)
   {
@@ -281,19 +301,24 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
 
     DH_free(dh);
   }
+#endif
 
   DBUG_PRINT("exit", ("OK 1"));
 
   DBUG_RETURN(ssl_fd);
 
+#ifdef HAVE_OPENSSL
 err3:
   DH_free(dh);
+#endif
 err2:
   SSL_CTX_free(ssl_fd->ssl_context);
 err1:
   my_free(ssl_fd);
 err0:
+#ifdef HAVE_OPENSSL
   DBUG_EXECUTE("error", ERR_print_errors_fp(DBUG_FILE););
+#endif
   DBUG_RETURN(0);
 }
 
@@ -348,17 +373,20 @@ new_VioSSLAcceptorFd(const char *key_file, const char *cert_file,
   /* Init the the VioSSLFd as a "acceptor" ie. the server side */
 
   /* Set max number of cached sessions, returns the previous size */
+#ifdef HAVE_OPENSSL
   SSL_CTX_sess_set_cache_size(ssl_fd->ssl_context, 128);
 
   SSL_CTX_set_verify(ssl_fd->ssl_context, verify, NULL);
-
+#endif
   /*
     Set session_id - an identifier for this server session
     Use the ssl_fd pointer
    */
+#ifdef HAVE_OPENSSL
   SSL_CTX_set_session_id_context(ssl_fd->ssl_context,
 				 (const unsigned char *)ssl_fd,
 				 sizeof(ssl_fd));
+#endif
 
   return ssl_fd;
 }
@@ -368,4 +396,4 @@ void free_vio_ssl_acceptor_fd(struct st_VioSSLFd *fd)
   SSL_CTX_free(fd->ssl_context);
   my_free(fd);
 }
-#endif /* HAVE_OPENSSL */
+#endif /* HAVE_SSL */
