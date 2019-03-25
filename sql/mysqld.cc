@@ -7388,7 +7388,7 @@ my_asn1_time_to_string(PRTime time, char *buf, size_t len)
   time_t t= (time_t)(time / 1000000);   /* PR_Time stores microseconds */
   struct tm ts= *gmtime(&t);
   bzero(buf, len);
-  strftime(buf, len - 1, "Apr %d %H:%M:%S %Y GMT", &ts);
+  strftime(buf, len - 1, "%b %d %H:%M:%S %Y GMT", &ts);
   return buf;
 }
 #endif

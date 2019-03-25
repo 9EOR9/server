@@ -114,8 +114,10 @@ static void clear_ctx(NSS_CIPHER_CTX *ctx)
     PK11_FreeSymKey(ctx->EncryptionKey);
   if (ctx->EncryptionIV)
     SECITEM_FreeItem(ctx->EncryptionIV, PR_TRUE);
+
   if (ctx->ctx)
     PK11_DestroyContext(ctx->ctx, PR_TRUE);
+
   memset(ctx, 0, sizeof(NSS_CIPHER_CTX));
 }
 
@@ -202,25 +204,27 @@ int my_aes_crypt_update(void *cctx, const uchar *src, uint slen,
     len= (slen / MY_AES_BLOCK_SIZE) * MY_AES_BLOCK_SIZE;
 
   /* We need to pad before encryption */
+
   if ((ctx->flags & (ENCRYPTION_FLAG_ENCRYPT | ENCRYPTION_FLAG_NOPAD)) && ctx->fixed)
   {
     if (!(ctx->flags & ENCRYPTION_FLAG_NOPAD))
     {
       unsigned int left = slen - len;
-      ma_pkcs7_pad((uchar *)src + len, &left, MY_AES_BLOCK_SIZE, 1);
+      ma_pkcs7_pad((uchar *)dst + len, &left, MY_AES_BLOCK_SIZE, 1);
       len += left;
     }
   }
 
   if (len)
   {
-    rc = PK11_CipherOp(ctx->ctx, dst, (int *)dlen, len, src, len);
+    rc = PK11_CipherOp(ctx->ctx, dst, (int *)dlen, len, dst, len);
     if (rc != SECSuccess || !*dlen)
     {
       return 1;
     }
   }
-
+  else
+    return 1;
   /* After decryption we need to remove padding */
   if (ctx->fixed && 
       !(ctx->flags & ENCRYPTION_FLAG_ENCRYPT) && 
@@ -263,9 +267,12 @@ int my_aes_crypt(enum my_aes_mode mode, int flags,
   void *ctx= alloca(MY_AES_CTX_SIZE);
   int res1, res2;
   uint d1= 0, d2= 0;
+
   if ((res1= my_aes_crypt_init(ctx, mode, flags, key, klen, iv, ivlen)))
     return res1;
-  res1= my_aes_crypt_update(ctx, src, slen, dst, &d1);
+
+  memcpy(dst, src, slen);
+  res1= my_aes_crypt_update(ctx, (flags & ENCRYPTION_FLAG_ENCRYPT) ? dst : src, slen, dst, &d1);
   res2= my_aes_crypt_finish(ctx, dst + d1, &d2);
   if (!res1 && !res2)
     *dlen= d1 + d2;

@@ -130,7 +130,7 @@ typedef struct
 /* OpenSSL treats SSL3 and TLSv1 the same */
 #define TLS1  SSL3
 
-#define MAX_NSS_CIPHERS sizeof(tls_ciphers) / sizeof(tls_ciphers[0]) + 1
+#define MAX_NSS_CIPHERS (unsigned int)(sizeof(tls_ciphers) / sizeof(tls_ciphers[0]) + 1)
 
 struct st_cipher_map {
   int sid;
@@ -283,6 +283,9 @@ AuthCertificateHandler(void *arg, PRFileDesc *ssl,
     ossl = nss_get_private(ssl);
 
     status = SSL_AuthCertificate(arg, ssl, checksig, isServer);
+
+    if (status == SECSuccess)
+      ossl->verify_result= X509_V_OK;
 
     /* If the user has requested their own verification callback them
      * use it. Otherwise fall back to the one provided by NSS.
