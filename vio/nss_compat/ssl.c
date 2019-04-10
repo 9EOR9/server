@@ -1786,6 +1786,8 @@ int na_nss_get_cipher_list(SSL *ssl, char *buff, size_t length)
   const PRUint16  cipher_cnt= SSL_GetNumImplementedCiphers();
   const PRUint16  *ciphers= SSL_GetImplementedCiphers();
 
+  *p= 0;
+
   for (i=0; (i < cipher_cnt) && (p - buff < length); i++)
   {
     PRBool enabled= PR_FALSE;
